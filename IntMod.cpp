@@ -1,6 +1,7 @@
 #include <immintrin.h>
 #include <string.h>
 
+#include <cassert>
 #include <iostream>
 
 #include "Int.h"
@@ -1474,8 +1475,8 @@ void Int::ECBatchMulK1AVX512(Int *scalars, Int *base_x, Int *base_y, Int *base_z
 
         // Process current batch
         for (int i = 0; i < remaining; i++) {
-            ECPointMulK1AVX512(&scalars[batch + i], base_x, base_y, base_z, &result_x[batch + i],
-                               &result_y[batch + i], &result_z[batch + i]);
+            result_x[batch + i].ECPointMulK1AVX512(&scalars[batch + i], base_x, base_y, base_z, &result_x[batch + i],
+                                      &result_y[batch + i], &result_z[batch + i]);
         }
     }
 }
@@ -1579,7 +1580,7 @@ void Int::ModMulK1ThreadSafe(Int *a, Int *b) {
     thread_local unsigned char c;
     thread_local uint64_t ah, al;
     thread_local uint64_t t[NB64BLOCK];
-    thread_local alignas(64) uint64_t r512[8];
+    alignas(64) thread_local uint64_t r512[8];
 
     // Initialize with zeros using AVX-512
     _mm512_storeu_si512((__m512i *)r512, _mm512_setzero_si512());
