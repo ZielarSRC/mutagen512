@@ -1389,8 +1389,19 @@ void Int::ECPointDoubleK1AVX512(Int *x, Int *y, Int *z) {
         temp.ShiftR(1);
     } else {
         // Add p then divide by 2
-        static const Int secp256k1_p_plus_1 = {0x7FFFFFFF7FFFFE18ULL, 0x0ULL, 0x0ULL, 0x8000000000000000ULL, 0x0ULL};
-        temp.Add(&secp256k1_p_plus_1);
+        static Int secp256k1_p_plus_1;
+    static bool secp256k1_p_plus_1_initialized = false;
+    if (!secp256k1_p_plus_1_initialized) {
+        secp256k1_p_plus_1.bits64[0] = 0x7FFFFFFF7FFFFE18ULL;
+        secp256k1_p_plus_1.bits64[1] = 0x0ULL;
+        secp256k1_p_plus_1.bits64[2] = 0x0ULL;
+        secp256k1_p_plus_1.bits64[3] = 0x8000000000000000ULL;
+        secp256k1_p_plus_1.bits64[4] = 0x0ULL;
+        secp256k1_p_plus_1_initialized = true;
+    }
+        Int temp_const;
+    temp_const.Set(&secp256k1_p_plus_1);
+    temp.Add(&temp_const);
         temp.ShiftR(1);
     }
     
