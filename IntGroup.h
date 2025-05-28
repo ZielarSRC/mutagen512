@@ -1,58 +1,70 @@
 #ifndef INTGROUPH
 #define INTGROUPH
 
-#include <immintrin.h>  // Dla instrukcji AVX-512
-#include <omp.h>        // Dla obsługi wielowątkowości
+#include <immintrin.h>
+#include <omp.h>
 
 #include <vector>
 
 #include "Int.h"
 
-// Optymalne wartości dla Xeon Platinum 8488C
-#define BATCH_SIZE_SMALL 16  // Optymalny rozmiar dla małych wsadów
-#define BATCH_SIZE_LARGE 64  // Optymalny rozmiar dla dużych wsadów
-#define MAX_THREADS 112      // Maksymalna liczba wątków dla 8488C
+// Cache line alignment for optimal Xeon 8488C performance
+#define CACHE_ALIGN alignas(64)
+#define FORCE_INLINE __attribute__((always_inline)) inline
 
 class IntGroup {
  public:
-  // Konstruktory
   IntGroup(int size);
   ~IntGroup();
 
-  // Podstawowe operacje
-  void Set(Int* pts);
+  void Set(Int *pts);
   void ModInv();
 
-  // Nowe zoptymalizowane metody
-  void ModInvBatch();           // Zoptymalizowana dla AVX-512
-  void ModInvParallel();        // Wersja z wielowątkowym przetwarzaniem
-  void ModInvBatchOptimized();  // Wersja z optymalnym wykorzystaniem pamięci podręcznej
+  // AVX-512 optimized batch operations for Xeon 8488C
+  void ParallelModInv();
+  void VectorizedModInv();
+  void OptimizedModInv();
 
-  // Funkcje pomocnicze
-  Int* GetElement(int idx);            // Dostęp do konkretnego elementu
-  void SetElement(int idx, Int* val);  // Ustawienie wartości elementu
+  // Advanced batch operations leveraging Xeon 8488C capabilities
+  static void BatchModInv(IntGroup *groups, int group_count);
+  static void ParallelBatchModInv(IntGroup *groups, int group_count,
+                                  int num_threads);
 
-  // Prefetching dla lepszej wydajności pamięci podręcznej
-  void PrefetchAll(int hint = _MM_HINT_T0);
-  void PrefetchRange(int start, int end, int hint = _MM_HINT_T0);
+  // Memory management optimized for Xeon 8488C cache hierarchy
+  void PrefetchData();
+  void AlignedMemoryOperations();
 
-  // Operacje wsadowe
-  void BatchOperation(void (*operation)(Int*));
-  void ParallelBatchOperation(void (*operation)(Int*));
-
-  // Uzyskiwanie danych
-  int GetSize() const { return size; }
-  Int* GetInts() { return ints; }
+  // Performance monitoring
+  uint64_t GetOperationCount() const { return operation_count; }
+  void ResetOperationCount() { operation_count = 0; }
 
  private:
-  Int* ints;  // Tablica elementów Int
-  Int* subp;  // Tablica do obliczeń pomocniczych
-  int size;   // Rozmiar grupy
+  CACHE_ALIGN Int *ints;
+  CACHE_ALIGN Int *subp;
+  CACHE_ALIGN Int *temp_buffer;  // Additional buffer for vectorized operations
+  int size;
+  uint64_t operation_count;
 
-  // Metody pomocnicze dla zoptymalizowanych operacji
-  void BatchInversionPrecompute();
-  void BatchInversionProcessRange(int start, int end);
-  void OptimizeThreads(int& numThreads, int& chunkSize);
+  // Xeon 8488C specific optimizations
+  void OptimizedForwardPass();
+  void OptimizedBackwardPass();
+  void VectorizedForwardPass();
+  void VectorizedBackwardPass();
+
+  // Memory prefetching strategies
+  FORCE_INLINE void PrefetchForward(int index);
+  FORCE_INLINE void PrefetchBackward(int index);
+
+  // AVX-512 optimized helper functions
+  void AVX512ModMulBatch(Int *a, Int *b, Int *result, int count);
+  void ParallelChunkProcess(int chunk_start, int chunk_end);
 };
+
+// Namespace for AVX-512 specialized operations
+namespace IntGroupAVX512 {
+void BatchSetup(IntGroup *groups, int count);
+void VectorizedInversion(Int *data, int size);
+void ParallelModularInversion(Int *data, int size, int num_threads);
+}  // namespace IntGroupAVX512
 
 #endif  // INTGROUPH
