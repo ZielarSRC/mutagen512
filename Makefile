@@ -12,13 +12,13 @@ ifeq ($(UNAME_S),Linux)
 CXX = g++
 
 # Intel Xeon Platinum 8488C (Sapphire Rapids) optimized flags
-CXXFLAGS = -m64 -std=c++17 -Ofast -march=sapphirerapids -mtune=sapphirerapids \
+CXXFLAGS = -O3 -m64 -std=c++17 -Ofast -march=sapphirerapids -mtune=sapphirerapids \
            -Wall -Wextra -Wno-write-strings -Wno-unused-variable \
            -Wno-deprecated-copy -Wno-unused-parameter -Wno-sign-compare \
            -Wno-strict-aliasing -Wno-unused-but-set-variable -Wno-unknown-pragmas \
            -funroll-loops -ftree-vectorize -fstrict-aliasing \
            -fno-semantic-interposition -fvect-cost-model=unlimited \
-           -fno-trapping-math -fipa-ra -flto -fassociative-math -fopenmp \
+           -fno-trapping-math -fipa-ra -fassociative-math -fopenmp \
            -mavx512f -mavx512dq -mavx512cd -mavx512bw -mavx512vl \
            -mavx512ifma -mavx512vbmi -mavx512vbmi2 -mavx512vnni \
            -mavx512bitalg -mavx512vpopcntdq -mavx512bf16 -mavx512fp16 \
@@ -69,7 +69,7 @@ ifeq ($(CHECK_COMPILER),)
 endif
 
 # Intel Xeon Platinum 8488C optimized flags for Windows
-CXXFLAGS = -m64 -std=c++17 -Ofast -march=sapphirerapids -mtune=sapphirerapids \
+CXXFLAGS = -O3 -m64 -std=c++17 -Ofast -march=sapphirerapids -mtune=sapphirerapids \
            -Wall -Wextra -Wno-write-strings -Wno-unused-variable \
            -Wno-deprecated-copy -Wno-unused-parameter -Wno-sign-compare \
            -Wno-strict-aliasing -Wno-unused-but-set-variable -Wno-unknown-pragmas \
