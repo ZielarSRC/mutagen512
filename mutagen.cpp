@@ -450,10 +450,7 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
     alignas(64) Point plusPoints[POINTS_BATCH_SIZE];
     alignas(64) Point minusPoints[POINTS_BATCH_SIZE];
 
-    // Prefetch point tables
-    _mm_prefetch((char*)plusPoints, _MM_HINT_T0);
-    _mm_prefetch((char*)minusPoints, _MM_HINT_T0);
-
+    // MOVED: Initialize points FIRST, then prefetch
     for (int i = 0; i < POINTS_BATCH_SIZE; i++) {
         Int tmp;
         tmp.SetInt32(i);
@@ -467,6 +464,10 @@ void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId, AVXCo
         minusPoints[i].x.ModReduceK1AVX512();
         minusPoints[i].y.ModReduceK1AVX512();
     }
+
+    // NOW prefetch after initialization
+    _mm_prefetch((char*)plusPoints, _MM_HINT_T0);
+    _mm_prefetch((char*)minusPoints, _MM_HINT_T0);
 
     alignas(64) Int deltaX[POINTS_BATCH_SIZE];
     IntGroup modGroup(POINTS_BATCH_SIZE);
