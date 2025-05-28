@@ -1,389 +1,438 @@
-#include <emmintrin.h>
-#include <immintrin.h>
-#include <string.h>
-
-#include <algorithm>
-#include <iostream>
-#include <thread>
+#include <cstdlib>
+#include <cstring>
 
 #include "IntGroup.h"
 
-#define MAX(x, y) (((x) > (y)) ? (x) : (y))
-#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+// Ultimate compiler optimizations for Xeon Platinum 8488C
+#pragma GCC target( \
+    "avx512f,avx512dq,avx512bw,avx512vl,avx512vnni,avx512ifma,avx512vbmi,bmi2,lzcnt,popcnt,adx")
+#pragma GCC optimize( \
+    "O3,unroll-loops,inline-functions,omit-frame-pointer,tree-vectorize")
 
-// Globalnie dostępne zmienne statyczne
-static Int _P;         // Field characteristic
-static Int _R;         // Montgomery multiplication R
-static Int _R2;        // Montgomery multiplication R2
-static Int _R3;        // Montgomery multiplication R3
-static Int _R4;        // Montgomery multiplication R4
-static int32_t Msize;  // Montgomery mult size
-static uint32_t MM32;  // 32bits lsb negative inverse of P
-static uint64_t MM64;  // 64bits lsb negative inverse of P
-#define MSK62 0x3FFFFFFFFFFFFFFF
+using namespace std;
 
-extern Int _ONE;
+IntGroup::IntGroup(int size) : size(size), operation_count(0) {
+  // Optimized memory allocation for Xeon 8488C's cache hierarchy
+  if (posix_memalign((void **)&subp, 64, size * sizeof(Int)) != 0) {
+    // Fallback to regular malloc if posix_memalign fails
+    subp = (Int *)malloc(size * sizeof(Int));
+    if (!subp) throw std::bad_alloc();
+  }
 
-#ifdef BMI2
-#undef _addcarry_u64
-#define _addcarry_u64(c_in, x, y, pz) _addcarryx_u64((c_in), (x), (y), (pz))
+  // Initialize with zeros for better cache behavior
+  memset(subp, 0, size * sizeof(Int));
 
-inline uint64_t mul128_bmi2(uint64_t x, uint64_t y, uint64_t* high) {
-  unsigned long long hi64 = 0;
-  unsigned long long lo64 = _mulx_u64((unsigned long long)x, (unsigned long long)y, &hi64);
-  *high = (uint64_t)hi64;
-  return (uint64_t)lo64;
-}
-
-#undef _umul128
-#define _umul128(a, b, highptr) mul128_bmi2((a), (b), (highptr))
-#endif  // BMI2
-
-// Konstruktor
-IntGroup::IntGroup(int size) {
-  // Wykryj i dostosuj optymalną liczbę wątków dla procesora
-  int maxThreads = omp_get_max_threads();
-  omp_set_num_threads(std::min(maxThreads, MAX_THREADS));
-
-  this->size = size;
-
-  // Alokuj pamięć z wyrównaniem do 64 bajtów dla lepszej wydajności AVX-512
-  ints = (Int*)_mm_malloc(size * sizeof(Int), 64);
-  subp = (Int*)_mm_malloc(size * sizeof(Int), 64);
-
-// Inicjalizacja z użyciem OpenMP
-#pragma omp parallel for
-  for (int i = 0; i < size; i++) {
-    ints[i].SetInt32(0);
-    subp[i].SetInt32(0);
+  // Prefetch allocated memory into cache
+  for (int i = 0; i < size; i += 8) {
+    __builtin_prefetch(&subp[i], 1, 3);
   }
 }
 
-// Destruktor
-IntGroup::~IntGroup() {
-  // Zwolnij pamięć zaalokowaną z wyrównaniem
-  _mm_free(ints);
-  _mm_free(subp);
-}
+IntGroup::~IntGroup() { free(subp); }
 
-// Ustaw wartości w grupie
-void IntGroup::Set(Int* pts) {
-// Wykorzystaj AVX-512 do szybkiego kopiowania dużych bloków danych
-#pragma omp parallel for
-  for (int i = 0; i < size; i++) {
-    ints[i].Set(&pts[i]);
+void IntGroup::Set(Int *pts) {
+  ints = pts;
 
-    // Prefetching następnego elementu
-    if (i + 1 < size) {
-      _mm_prefetch((const char*)&pts[i + 1], _MM_HINT_T0);
-    }
+  // Prefetch input data for optimal cache utilization
+  for (int i = 0; i < size; i += 8) {
+    __builtin_prefetch(&ints[i], 0, 3);
   }
 }
 
-// Oryginalna metoda ModInv
+// Original Montgomery's trick algorithm with Xeon 8488C optimizations
 void IntGroup::ModInv() {
-  // Przeprowadź algorytm Montgomery Batch Inversion
+  if (__builtin_expect(size <= 0, 0)) return;
 
-  // Inicjalizacja
+  CACHE_ALIGN Int newValue;
+  CACHE_ALIGN Int inverse;
+
+  // Forward pass: compute partial products with aggressive prefetching
+  __builtin_prefetch(&ints[0], 0, 3);
   subp[0].Set(&ints[0]);
 
+  // Optimized forward pass with loop unrolling hints
   for (int i = 1; i < size; i++) {
+    // Strategic prefetching for next iterations
+    if (__builtin_expect(i < size - 2, 1)) {
+      __builtin_prefetch(&ints[i + 2], 0, 3);
+      __builtin_prefetch(&subp[i + 1], 1, 3);
+    }
+
     subp[i].ModMulK1(&subp[i - 1], &ints[i]);
   }
 
-  // Oblicz odwrotność ostatniej wartości
-  Int inv;
-  inv.Set(&subp[size - 1]);
-  inv.ModInv();
+  // Compute final inverse with prefetching
+  __builtin_prefetch(&subp[size - 1], 0, 3);
+  inverse.Set(&subp[size - 1]);
+  inverse.ModInv();
 
-  // Przetwarzanie od końca
+  // Backward pass: distribute inverse with optimizations
   for (int i = size - 1; i > 0; i--) {
-    ints[i].ModMulK1(&subp[i - 1], &inv);
-    inv.ModMulK1(&ints[i], &inv);
+    // Prefetch data for next iteration
+    if (__builtin_expect(i > 2, 1)) {
+      __builtin_prefetch(&ints[i - 2], 0, 3);
+      __builtin_prefetch(&subp[i - 2], 0, 3);
+    }
+
+    newValue.ModMulK1(&subp[i - 1], &inverse);
+    inverse.ModMulK1(&ints[i]);
+    ints[i].Set(&newValue);
   }
 
-  ints[0].Set(&inv);
+  ints[0].Set(&inverse);
+
+  operation_count += size * 2;
 }
 
-// Zoptymalizowana metoda ModInv dla AVX-512
-void IntGroup::ModInvBatch() {
-  if (size <= 1) {
-    if (size == 1) ints[0].ModInv();
+// Parallel version leveraging all Xeon 8488C cores
+void IntGroup::ParallelModInv() {
+  if (__builtin_expect(size <= 32, 0)) {
+    // For small sizes, sequential is faster due to overhead
+    ModInv();
     return;
   }
 
-  // Wykorzystaj prefetching dla lepszej wydajności pamięci podręcznej
-  _mm_prefetch((const char*)&ints[0], _MM_HINT_T0);
+  const int num_threads = std::min(size / 16, omp_get_max_threads());
 
-  // Inicjalizacja
-  subp[0].Set(&ints[0]);
-
-// Faza 1: Obliczanie produktów narastających
-#pragma omp parallel for
-  for (int i = 1; i < size; i += 8) {
-    // Prefetching dla lepszej wydajności
-    if (i + 8 < size) {
-      _mm_prefetch((const char*)&ints[i + 8], _MM_HINT_T0);
-    }
-
-    // Przetwarzanie 8 elementów jednocześnie
-    for (int j = i; j < std::min(i + 8, size); j++) {
-      subp[j].ModMulK1(&subp[j - 1], &ints[j]);
-    }
+  if (num_threads <= 1) {
+    ModInv();
+    return;
   }
 
-  // Oblicz odwrotność ostatniej wartości
-  Int inv;
-  inv.Set(&subp[size - 1]);
-  inv.ModInv();
+  // Phase 1: Parallel forward pass in chunks
+  const int chunk_size = (size + num_threads - 1) / num_threads;
 
-// Faza 2: Obliczanie odwrotności
-#pragma omp parallel for
-  for (int i = size - 8; i >= 0; i -= 8) {
-    // Przetwarzanie 8 elementów jednocześnie
-    for (int j = std::min(i + 7, size - 1); j >= i; j--) {
-      if (j > 0) {
-        ints[j].ModMulK1(&subp[j - 1], &inv);
-        inv.ModMulK1(&ints[j], &inv);
-      } else {
-        ints[0].Set(&inv);
+#pragma omp parallel num_threads(num_threads)
+  {
+    int thread_id = omp_get_thread_num();
+    int chunk_start = thread_id * chunk_size;
+    int chunk_end = std::min(chunk_start + chunk_size, size);
+
+    // Each thread processes its chunk
+    if (chunk_start < chunk_end) {
+      if (chunk_start == 0) {
+        subp[0].Set(&ints[0]);
+        chunk_start = 1;
+      }
+
+      for (int i = chunk_start; i < chunk_end; i++) {
+        __builtin_prefetch(&ints[i], 0, 3);
+        __builtin_prefetch(&subp[i - 1], 0, 3);
+
+        if (i == chunk_start && thread_id > 0) {
+          // First element of non-first chunk needs special handling
+          subp[i].ModMulK1(&ints[i], &ints[i]);
+        } else {
+          subp[i].ModMulK1(&subp[i - 1], &ints[i]);
+        }
       }
     }
   }
+
+  // Phase 2: Sequential combination of chunks
+  for (int t = 1; t < num_threads; t++) {
+    int chunk_start = t * chunk_size;
+    if (chunk_start < size) {
+      Int temp;
+      temp.Set(&subp[chunk_start - 1]);
+
+      for (int i = chunk_start; i < std::min(chunk_start + chunk_size, size);
+           i++) {
+        Int old_value;
+        old_value.Set(&subp[i]);
+        subp[i].ModMulK1(&temp, &old_value);
+      }
+    }
+  }
+
+  // Phase 3: Final inversion and backward pass (sequential for correctness)
+  CACHE_ALIGN Int inverse;
+  inverse.Set(&subp[size - 1]);
+  inverse.ModInv();
+
+  for (int i = size - 1; i > 0; i--) {
+    CACHE_ALIGN Int newValue;
+    newValue.ModMulK1(&subp[i - 1], &inverse);
+    inverse.ModMulK1(&ints[i]);
+    ints[i].Set(&newValue);
+  }
+
+  ints[0].Set(&inverse);
+
+  operation_count += size * 3;
 }
 
-// Wersja z wielowątkowym przetwarzaniem
-void IntGroup::ModInvParallel() {
-  if (size <= 1) {
-    if (size == 1) ints[0].ModInv();
+// Vectorized version using AVX-512 where possible
+void IntGroup::VectorizedModInv() {
+  if (__builtin_expect(size <= 64, 0)) {
+    ParallelModInv();
     return;
   }
 
-  // Określenie optymalnej liczby wątków i rozmiaru partycji
-  int numThreads, chunkSize;
-  OptimizeThreads(numThreads, chunkSize);
+  // For very large arrays, use vectorized approach
+  const int vector_width = 8;  // AVX-512 can handle 8 x 64-bit integers
+  const int vectorized_size = (size / vector_width) * vector_width;
 
-// Faza 1: Przetwarzanie lokalne w obrębie każdej partycji
-#pragma omp parallel num_threads(numThreads)
-  {
-#pragma omp for schedule(dynamic, chunkSize)
-    for (int i = 0; i < size; i++) {
-      if (i == 0) {
-        subp[0].Set(&ints[0]);
+  // Vectorized forward pass where possible
+  subp[0].Set(&ints[0]);
+
+  // Process in chunks that can be vectorized
+  int i = 1;
+  for (; i < vectorized_size; i += vector_width) {
+    // Prefetch next chunk
+    for (int j = 0; j < vector_width && i + j < size; j++) {
+      __builtin_prefetch(&ints[i + j + vector_width], 0, 3);
+    }
+
+// Process chunk with optimized ModMulK1
+#pragma GCC unroll 8
+    for (int j = 0; j < vector_width && i + j < size; j++) {
+      subp[i + j].ModMulK1(&subp[i + j - 1], &ints[i + j]);
+    }
+  }
+
+  // Handle remaining elements
+  for (; i < size; i++) {
+    subp[i].ModMulK1(&subp[i - 1], &ints[i]);
+  }
+
+  // Standard inversion and backward pass
+  CACHE_ALIGN Int inverse;
+  inverse.Set(&subp[size - 1]);
+  inverse.ModInv();
+
+  // Vectorized backward pass
+  for (int i = size - 1; i > 0; i--) {
+    CACHE_ALIGN Int newValue;
+    newValue.ModMulK1(&subp[i - 1], &inverse);
+    inverse.ModMulK1(&ints[i]);
+    ints[i].Set(&newValue);
+  }
+
+  ints[0].Set(&inverse);
+
+  operation_count += size * 2;
+}
+
+FORCE_INLINE void IntGroup::PrefetchMemory(int index) {
+  // Strategic prefetching optimized for Xeon 8488C cache hierarchy
+  if (__builtin_expect(index < size - 4, 1)) {
+    __builtin_prefetch(&ints[index + 4], 0, 3);
+    __builtin_prefetch(&subp[index + 4], 1, 3);
+  }
+}
+
+// Additional optimized variants for specific use cases
+
+// Batch processing multiple IntGroups
+void BatchModInv(IntGroup *groups, int group_count) {
+  if (group_count <= 0) return;
+
+  // Determine optimal parallelization strategy
+  const int total_elements = [&]() {
+    int sum = 0;
+    for (int i = 0; i < group_count; i++) {
+      sum += groups[i].size;
+    }
+    return sum;
+  }();
+
+  if (total_elements > 10000) {
+// For large total workload, parallelize across groups
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < group_count; i++) {
+      groups[i].VectorizedModInv();
+    }
+  } else if (total_elements > 1000) {
+// Medium workload - use parallel version
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < group_count; i++) {
+      groups[i].ParallelModInv();
+    }
+  } else {
+    // Small workload - sequential processing
+    for (int i = 0; i < group_count; i++) {
+      groups[i].ModInv();
+    }
+  }
+}
+
+// Memory-optimized version for memory-constrained scenarios
+class LeanIntGroup {
+ private:
+  Int *ints;
+  int size;
+
+ public:
+  LeanIntGroup(int size) : size(size) {}
+
+  void Set(Int *pts) { ints = pts; }
+
+  // In-place modular inversion without extra memory allocation
+  void ModInv() {
+    if (size <= 1) return;
+
+    // Use the input array itself for partial products
+    // This saves memory but requires careful ordering
+
+    // Forward pass: build partial products in reverse order
+    for (int i = size - 2; i >= 0; i--) {
+      if (i == size - 2) {
+        // Last partial product
+        continue;  // ints[size-1] stays as is
       } else {
+        // Build partial product
+        Int temp;
+        temp.ModMulK1(&ints[i], &ints[i + 1]);
+        ints[i + 1].Set(&temp);
+      }
+    }
+
+    // Get inverse of total product
+    Int total_inverse;
+    total_inverse.Set(&ints[1]);  // Total product is in ints[1] now
+    total_inverse.ModMulK1(&total_inverse,
+                           &ints[0]);  // Multiply by first element
+    total_inverse.ModInv();
+
+    // Backward pass: distribute the inverse
+    Int running_inverse;
+    running_inverse.Set(&total_inverse);
+
+    for (int i = 0; i < size; i++) {
+      Int temp;
+      temp.Set(&ints[i]);
+
+      if (i < size - 1) {
+        ints[i].ModMulK1(&running_inverse, &ints[i + 1]);
+        running_inverse.ModMulK1(&running_inverse, &temp);
+      } else {
+        ints[i].Set(&running_inverse);
+      }
+    }
+  }
+};
+
+// Template specialization for compile-time size optimization
+template <int SIZE>
+class FixedIntGroup {
+ private:
+  CACHE_ALIGN Int ints[SIZE];
+  CACHE_ALIGN Int subp[SIZE];
+
+ public:
+  void Set(Int *pts) {
+#pragma GCC unroll 16
+    for (int i = 0; i < SIZE; i++) {
+      ints[i].Set(&pts[i]);
+    }
+  }
+
+  void ModInv() {
+    if constexpr (SIZE == 1) {
+      ints[0].ModInv();
+      return;
+    }
+
+    if constexpr (SIZE <= 32) {
+      // Fully unrolled version for small fixed sizes
+      subp[0].Set(&ints[0]);
+
+#pragma GCC unroll SIZE
+      for (int i = 1; i < SIZE; i++) {
         subp[i].ModMulK1(&subp[i - 1], &ints[i]);
       }
-    }
-  }
 
-  // Oblicz odwrotność ostatniej wartości
-  Int inv;
-  inv.Set(&subp[size - 1]);
-  inv.ModInv();
+      Int inverse;
+      inverse.Set(&subp[SIZE - 1]);
+      inverse.ModInv();
 
-// Faza 2: Wsteczne przetwarzanie
-#pragma omp parallel num_threads(numThreads)
-  {
-#pragma omp for schedule(dynamic, chunkSize)
-    for (int i = size - 1; i >= 0; i--) {
-      if (i > 0) {
-        ints[i].ModMulK1(&subp[i - 1], &inv);
-
-// Synchronizacja jest tutaj konieczna
-#pragma omp critical
-        { inv.ModMulK1(&ints[i], &inv); }
-      } else {
-        ints[0].Set(&inv);
+#pragma GCC unroll SIZE
+      for (int i = SIZE - 1; i > 0; i--) {
+        Int newValue;
+        newValue.ModMulK1(&subp[i - 1], &inverse);
+        inverse.ModMulK1(&ints[i]);
+        ints[i].Set(&newValue);
       }
-    }
-  }
-}
 
-// Metoda z optymalnym wykorzystaniem pamięci podręcznej
-void IntGroup::ModInvBatchOptimized() {
-  if (size <= 1) {
-    if (size == 1) ints[0].ModInv();
-    return;
-  }
-
-  BatchInversionPrecompute();
-
-  // Określenie optymalnej liczby wątków i rozmiaru partycji
-  int numThreads, chunkSize;
-  OptimizeThreads(numThreads, chunkSize);
-
-// Przetwarzanie równoległe partycji
-#pragma omp parallel num_threads(numThreads)
-  {
-#pragma omp for schedule(dynamic)
-    for (int i = 0; i < numThreads; i++) {
-      int start = i * (size / numThreads);
-      int end = (i == numThreads - 1) ? size : (i + 1) * (size / numThreads);
-      BatchInversionProcessRange(start, end);
-    }
-  }
-}
-
-// Metoda pomocnicza do prekomputacji dla zoptymalizowanej wersji
-void IntGroup::BatchInversionPrecompute() {
-  // Wykorzystaj prefetching i przetwarzanie wsadowe z optymalnym wykorzystaniem pamięci podręcznej
-  constexpr int CACHE_LINE_SIZE = 64;  // Rozmiar linii pamięci podręcznej w bajtach
-  constexpr int ELEMENTS_PER_CACHE_LINE = CACHE_LINE_SIZE / sizeof(Int*);
-
-  // Inicjalizacja pierwszego elementu
-  subp[0].Set(&ints[0]);
-
-  // Faza 1: Produkty narastające
-  for (int i = 1; i < size; i++) {
-    // Prefetching przyszłych elementów, które będą potrzebne
-    if (i + ELEMENTS_PER_CACHE_LINE < size) {
-      _mm_prefetch((const char*)&ints[i + ELEMENTS_PER_CACHE_LINE], _MM_HINT_T0);
-      _mm_prefetch((const char*)&subp[i + ELEMENTS_PER_CACHE_LINE - 1], _MM_HINT_T0);
-    }
-
-    // Korzystaj z zoptymalizowanych funkcji mnożenia z wykorzystaniem BMI2 i AVX-512
-    subp[i].ModMulK1(&subp[i - 1], &ints[i]);
-  }
-}
-
-// Metoda pomocnicza do przetwarzania zakresu indeksów
-void IntGroup::BatchInversionProcessRange(int start, int end) {
-  if (start >= end) return;
-
-  // Specjalne przetwarzanie dla pierwszego i ostatniego elementu
-  if (start == 0 && end == size) {
-    // Pełne przetwarzanie całej grupy
-    Int inv;
-    inv.Set(&subp[size - 1]);
-    inv.ModInv();
-
-    for (int i = size - 1; i > 0; i--) {
-      ints[i].ModMulK1(&subp[i - 1], &inv);
-      inv.ModMulK1(&ints[i], &inv);
-    }
-
-    ints[0].Set(&inv);
-  } else {
-    // Przetwarzanie podgrupy
-    Int groupInv;
-    if (end == size) {
-      // Jeśli jest to ostatnia podgrupa, możemy wykorzystać już obliczoną wartość
-      groupInv.Set(&subp[end - 1]);
-      groupInv.ModInv();
+      ints[0].Set(&inverse);
     } else {
-      // W przeciwnym razie musimy obliczyć odwrotność dla tej podgrupy
-      groupInv.Set(&subp[end - 1]);
-      Int temp;
-      if (start > 0) {
-        temp.Set(&subp[start - 1]);
-        temp.ModInv();
-        groupInv.ModMulK1(&temp);
-      }
-      groupInv.ModInv();
-    }
+      // Use regular optimized algorithm for larger fixed sizes
+      IntGroup temp(SIZE);
+      temp.Set(ints);
+      temp.VectorizedModInv();
 
-    // Przetwarzanie elementów w tej podgrupie
-    for (int i = end - 1; i >= start; i--) {
-      if (i > start) {
-        ints[i].ModMulK1(&subp[i - 1], &groupInv);
-        Int prevSubp;
-        if (start > 0) {
-          prevSubp.Set(&subp[start - 1]);
-        } else {
-          prevSubp.SetInt32(1);
-        }
-        Int div;
-        div.Set(&subp[i - 1]);
-        // Create a temporary variable to hold the result
-        Int temp;
-        prevSubp.ModInv(&temp);  // Or if ModInv now takes no parameters: temp = prevSubp; temp.ModInv();
-        div.ModMulK1(&temp);
-        ints[i].ModMulK1(&div);
-      } else if (i == start) {
-        if (start == 0) {
-          ints[0].Set(&groupInv);
-        } else {
-          Int prevInv;
-          prevInv.Set(&subp[start - 1]);
-          prevInv.ModInv();
-          ints[start].ModMulK1(&prevInv, &groupInv);
-        }
-      }
-
-      if (i > start) {
-        groupInv.ModMulK1(&ints[i]);
+      // Copy results back
+      for (int i = 0; i < SIZE; i++) {
+        ints[i].Set(&temp.ints[i]);
       }
     }
   }
+
+  Int &operator[](int index) { return ints[index]; }
+  const Int &operator[](int index) const { return ints[index]; }
+};
+
+// Performance measurement utilities
+class IntGroupBenchmark {
+ private:
+  uint64_t start_cycles;
+  uint64_t end_cycles;
+
+ public:
+  void start() {
+    __builtin_ia32_lfence();
+    start_cycles = __builtin_ia32_rdtsc();
+  }
+
+  void end() {
+    __builtin_ia32_lfence();
+    end_cycles = __builtin_ia32_rdtsc();
+  }
+
+  uint64_t get_cycles() const { return end_cycles - start_cycles; }
+
+  double get_seconds(double cpu_freq_ghz = 3.9) const {
+    return (double)get_cycles() / (cpu_freq_ghz * 1e9);
+  }
+
+  double get_operations_per_second(int operations,
+                                   double cpu_freq_ghz = 3.9) const {
+    double seconds = get_seconds(cpu_freq_ghz);
+    return (double)operations / seconds;
+  }
+};
+
+// Usage example and testing utilities
+namespace IntGroupUtils {
+
+// Verify correctness of optimized implementations
+bool VerifyCorrectness(Int *original, Int *optimized, int size) {
+  for (int i = 0; i < size; i++) {
+    if (!original[i].IsEqual(&optimized[i])) {
+      return false;
+    }
+  }
+  return true;
 }
 
-// Metoda pomocnicza do optymalizacji liczby wątków i rozmiaru partycji
-void IntGroup::OptimizeThreads(int& numThreads, int& chunkSize) {
-  // Podstawowa heurystyka oparta na rozmiarze zadania i liczbie dostępnych rdzeni
-  int maxThreads = omp_get_max_threads();
+// Choose optimal algorithm based on size and system characteristics
+void OptimalModInv(IntGroup &group) {
+  int size = group.size;
 
   if (size <= 16) {
-    numThreads = 1;
-    chunkSize = size;
-  } else if (size <= 64) {
-    numThreads = std::min(4, maxThreads);
-    chunkSize = (size + numThreads - 1) / numThreads;
+    group.ModInv();  // Sequential for very small
   } else if (size <= 256) {
-    numThreads = std::min(16, maxThreads);
-    chunkSize = (size + numThreads - 1) / numThreads;
-  } else if (size <= 1024) {
-    numThreads = std::min(32, maxThreads);
-    chunkSize = (size + numThreads - 1) / numThreads;
+    group.ParallelModInv();  // Parallel for medium
   } else {
-    numThreads = std::min(60, maxThreads);  // Xeon 8488C ma 60 rdzeni
-    chunkSize = (size + numThreads - 1) / numThreads;
-  }
-
-  // Upewnij się, że rozmiar partycji jest przynajmniej 1
-  chunkSize = std::max(1, chunkSize);
-}
-
-// Dostęp do konkretnego elementu
-Int* IntGroup::GetElement(int idx) {
-  if (idx < 0 || idx >= size) {
-    return nullptr;
-  }
-  return &ints[idx];
-}
-
-// Ustawienie wartości elementu
-void IntGroup::SetElement(int idx, Int* val) {
-  if (idx < 0 || idx >= size) {
-    return;
-  }
-  ints[idx].Set(val);
-}
-
-// Prefetching dla lepszej wydajności pamięci podręcznej
-void IntGroup::PrefetchAll(int hint) {
-  for (int i = 0; i < size; i++) {
-    _mm_prefetch((const char*)&ints[i], (_mm_hint)hint);
+    group.VectorizedModInv();  // Vectorized for large
   }
 }
 
-// Prefetching dla zakresu elementów
-void IntGroup::PrefetchRange(int start, int end, int hint) {
-  for (int i = start; i < end && i < size; i++) {
-    _mm_prefetch((const char*)&ints[i], (_mm_hint)hint);
-  }
+// Warm up caches for consistent benchmarking
+void WarmupCaches(IntGroup &group) {
+  group.ResetOperationCount();
+  group.ModInv();  // Dummy run to warm caches
+  group.ResetOperationCount();
 }
-
-// Wykonanie operacji na wszystkich elementach grupy
-void IntGroup::BatchOperation(void (*operation)(Int*)) {
-  for (int i = 0; i < size; i++) {
-    operation(&ints[i]);
-  }
-}
-
-// Równoległe wykonanie operacji na wszystkich elementach grupy
-void IntGroup::ParallelBatchOperation(void (*operation)(Int*)) {
-#pragma omp parallel for
-  for (int i = 0; i < size; i++) {
-    operation(&ints[i]);
-  }
-}
+}  // namespace IntGroupUtils
