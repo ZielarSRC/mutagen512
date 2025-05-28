@@ -4,6 +4,7 @@
 #define BIGINTH
 
 #include <string>
+#include <cstring>
 #include <inttypes.h>
 #include <immintrin.h>
 
