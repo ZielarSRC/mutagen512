@@ -1,7 +1,13 @@
 #ifndef POINTH
 #define POINTH
 
+#include <immintrin.h>
+#include <omp.h>
+
 #include "Int.h"
+
+// Cache line alignment for Xeon 8488C optimal performance
+#define CACHE_ALIGN alignas(64)
 
 class Point {
  public:
@@ -18,17 +24,34 @@ class Point {
   void Clear();
   void Reduce();
 
-  // Memory-aligned operations for Xeon 8488C optimization
-  void AlignedSet(const Point &p);
-  void BatchReduce(Point *points, int count);
+  // AVX-512 optimized batch operations for Xeon 8488C
+  static void BatchReduce(Point *points, int count);
+  static void BatchEquals(Point *points1, Point *points2, bool *results,
+                          int count);
+  static void BatchIsZero(Point *points, bool *results, int count);
 
-  Int x;
-  Int y;
-  Int z;
+  // VNNI-optimized vector operations
+  void VectorizedSet(const Point &p);
+  void PrefetchOptimizedCopy(const Point &p);
+
+  // Memory-aligned operations for Xeon 8488C L3 cache optimization
+  void CACHE_ALIGN AlignedSet(const Point &p);
+
+  CACHE_ALIGN Int x;
+  CACHE_ALIGN Int y;
+  CACHE_ALIGN Int z;
 
  private:
-  // Cache-aligned helper functions for Xeon 8488C
-  void OptimizedModInv(Int *target);
+  // Xeon 8488C specific optimizations
+  static void OptimizedModInvBatch(Int *targets, int count);
+  void PrefetchMemory() const;
 };
+
+// AVX-512 vectorized point operations
+namespace PointAVX512 {
+void BatchClear(Point *points, int count);
+void ParallelReduce(Point *points, int count, int num_threads);
+bool VectorizedEquals(const Point &p1, const Point &p2);
+}  // namespace PointAVX512
 
 #endif  // POINTH
