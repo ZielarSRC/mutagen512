@@ -1553,8 +1553,8 @@ void Int::ECBatchMulK1AVX512(Int *scalars, Int *base_x, Int *base_y, Int *base_z
         
         // Process batch
         for (int j = 0; j < remaining; j++) {
-            Int::ECPointMulK1AVX512(&scalars[i + j], &base_x[i + j], &base_y[i + j], &base_z[i + j],
-                               &result_x[i + j], &result_y[i + j], &result_z[i + j]);
+            result_x[i + j].ECPointMulK1AVX512(&scalars[i + j], &base_x[i + j], &base_y[i + j], &base_z[i + j],
+                                              &result_x[i + j], &result_y[i + j], &result_z[i + j]);
         }
         
         // Apply batch reduction
