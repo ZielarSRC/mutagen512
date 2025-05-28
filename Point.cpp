@@ -1,169 +1,119 @@
-#include <algorithm>
-#include <cstring>
-
 #include "Point.h"
-
-// Compiler optimizations for Xeon 8488C
-#pragma GCC target( \
-    "avx512f,avx512dq,avx512bw,avx512vl,avx512vnni,bmi2,lzcnt,popcnt")
-#pragma GCC optimize("O3,unroll-loops,inline-functions,omit-frame-pointer")
+#include <immintrin.h>
 
 Point::Point() {
-  // Prefetch cache lines for optimal Xeon 8488C performance
-  PrefetchMemory();
 }
 
-Point::Point(const Point &p) { VectorizedSet(p); }
+Point::Point(const Point &p) {
+  // Prefetch source data for optimal cache performance
+  _mm_prefetch((char*)p.x.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.y.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.z.bits64, _MM_HINT_T0);
+  
+  x.Set((Int *)&p.x);
+  y.Set((Int *)&p.y);
+  z.Set((Int *)&p.z);
+}
 
-Point::Point(Int *cx, Int *cy, Int *cz) {
-  // Prefetch input memory for better cache utilization
-  __builtin_prefetch(cx, 0, 3);
-  __builtin_prefetch(cy, 0, 3);
-  __builtin_prefetch(cz, 0, 3);
-
+Point::Point(Int *cx,Int *cy,Int *cz) {
+  // Prefetch input data
+  _mm_prefetch((char*)cx->bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)cy->bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)cz->bits64, _MM_HINT_T0);
+  
   x.Set(cx);
   y.Set(cy);
   z.Set(cz);
 }
 
 Point::Point(Int *cx, Int *cz) {
-  __builtin_prefetch(cx, 0, 3);
-  __builtin_prefetch(cz, 0, 3);
-
+  // Prefetch input data
+  _mm_prefetch((char*)cx->bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)cz->bits64, _MM_HINT_T0);
+  
   x.Set(cx);
   z.Set(cz);
 }
 
 void Point::Clear() {
-  // AVX-512 optimized clearing using VNNI when possible
+  // Use vectorized clear operations where possible
   x.SetInt32(0);
   y.SetInt32(0);
   z.SetInt32(0);
+  
+  // Ensure all high bits are cleared using AVX-512
+  #if BISIZE >= 256
+  // Clear any remaining high bits efficiently
+  _mm512_storeu_si512((__m512i*)x.bits64, _mm512_setzero_si512());
+  _mm512_storeu_si512((__m512i*)y.bits64, _mm512_setzero_si512());
+  _mm512_storeu_si512((__m512i*)z.bits64, _mm512_setzero_si512());
+  #endif
 }
 
-void Point::Set(Int *cx, Int *cy, Int *cz) {
-  // Vectorized memory operations for Xeon 8488C
-  __builtin_prefetch(cx, 0, 3);
-  __builtin_prefetch(cy, 0, 3);
-  __builtin_prefetch(cz, 0, 3);
-
+void Point::Set(Int *cx, Int *cy,Int *cz) {
+  // Prefetch all input data for optimal cache performance
+  _mm_prefetch((char*)cx->bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)cy->bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)cz->bits64, _MM_HINT_T0);
+  
   x.Set(cx);
   y.Set(cy);
   z.Set(cz);
 }
 
-Point::~Point() {}
+Point::~Point() {
+}
 
-void Point::Set(Point &p) { VectorizedSet(p); }
+void Point::Set(Point &p) {
+  // Prefetch source point data
+  _mm_prefetch((char*)p.x.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.y.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.z.bits64, _MM_HINT_T0);
+  
+  x.Set(&p.x);
+  y.Set(&p.y);
+  z.Set(&p.z);
+}
 
 bool Point::isZero() {
-  // Branch prediction optimized for common case
-  return __builtin_expect(x.IsZero() && y.IsZero(), 0);
+  // Prefetch data for zero check
+  _mm_prefetch((char*)x.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)y.bits64, _MM_HINT_T0);
+  
+  return x.IsZero() && y.IsZero();
 }
 
 void Point::Reduce() {
-  // Optimized reduction leveraging Xeon 8488C's improved modular inverse
+  // Prefetch point data for reduction
+  _mm_prefetch((char*)x.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)y.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)z.bits64, _MM_HINT_T0);
+
   Int i(&z);
-
-  // Prefetch data for modular operations
-  __builtin_prefetch(&z, 0, 3);
-  __builtin_prefetch(&x, 1, 3);
-  __builtin_prefetch(&y, 1, 3);
-
   i.ModInv();
-  x.ModMul(&x, &i);
-  y.ModMul(&y, &i);
+  
+  // Use optimized K1 multiplication for secp256k1
+  x.ModMulK1(&x,&i);
+  y.ModMulK1(&y,&i);
+  
+  // Apply fast reduction for secp256k1
+  x.ModReduceK1AVX512();
+  y.ModReduceK1AVX512();
+  
   z.SetInt32(1);
+  
+  // Memory fence to ensure reduction is complete
+  _mm_mfence();
 }
 
 bool Point::equals(Point &p) {
-  // SIMD-optimized comparison using AVX-512
-  return PointAVX512::VectorizedEquals(*this, p);
+  // Prefetch both points' data for comparison
+  _mm_prefetch((char*)x.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)y.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)z.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.x.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.y.bits64, _MM_HINT_T0);
+  _mm_prefetch((char*)p.z.bits64, _MM_HINT_T0);
+  
+  return x.IsEqual(&p.x) && y.IsEqual(&p.y) && z.IsEqual(&p.z);
 }
-
-// AVX-512 optimized batch operations for maximum Xeon 8488C utilization
-void Point::BatchReduce(Point *points, int count) {
-  // Use all available cores with optimal thread count for Xeon 8488C
-  const int optimal_threads = std::min(count, omp_get_max_threads());
-  PointAVX512::ParallelReduce(points, count, optimal_threads);
-}
-
-void Point::BatchEquals(Point *points1, Point *points2, bool *results,
-                        int count) {
-#pragma omp parallel for simd aligned(points1, points2, results : 64) \
-    schedule(static)
-  for (int i = 0; i < count; i++) {
-    results[i] = PointAVX512::VectorizedEquals(points1[i], points2[i]);
-  }
-}
-
-void Point::BatchIsZero(Point *points, bool *results, int count) {
-#pragma omp parallel for simd aligned(points, results : 64) schedule(static)
-  for (int i = 0; i < count; i++) {
-    results[i] = points[i].isZero();
-  }
-}
-
-void Point::VectorizedSet(const Point &p) {
-  // Cache-optimized memory copy using Xeon 8488C's enhanced memory subsystem
-  PrefetchOptimizedCopy(p);
-  x.Set((Int *)&p.x);
-  y.Set((Int *)&p.y);
-  z.Set((Int *)&p.z);
-}
-
-void Point::PrefetchOptimizedCopy(const Point &p) {
-  // Strategic prefetching for Xeon 8488C's 260MB L3 cache
-  __builtin_prefetch(&p.x, 0, 3);
-  __builtin_prefetch(&p.y, 0, 3);
-  __builtin_prefetch(&p.z, 0, 3);
-  __builtin_prefetch(&x, 1, 3);
-  __builtin_prefetch(&y, 1, 3);
-  __builtin_prefetch(&z, 1, 3);
-}
-
-void Point::AlignedSet(const Point &p) {
-  // Use cache-aligned operations for maximum bandwidth utilization
-  VectorizedSet(p);
-}
-
-void Point::OptimizedModInvBatch(Int *targets, int count) {
-// Batch modular inverse using Montgomery's trick for Xeon 8488C
-#pragma omp parallel for schedule(dynamic, 4)
-  for (int i = 0; i < count; i++) {
-    targets[i].ModInv();
-  }
-}
-
-void Point::PrefetchMemory() const {
-  __builtin_prefetch(&x, 0, 3);
-  __builtin_prefetch(&y, 0, 3);
-  __builtin_prefetch(&z, 0, 3);
-}
-
-// AVX-512 namespace implementations
-namespace PointAVX512 {
-
-void BatchClear(Point *points, int count) {
-#pragma omp parallel for simd aligned(points : 64) schedule(static)
-  for (int i = 0; i < count; i++) {
-    points[i].Clear();
-  }
-}
-
-void ParallelReduce(Point *points, int count, int num_threads) {
-  omp_set_num_threads(num_threads);
-
-#pragma omp parallel for schedule(dynamic, 1)
-  for (int i = 0; i < count; i++) {
-    points[i].Reduce();
-  }
-}
-
-bool VectorizedEquals(const Point &p1, const Point &p2) {
-  // Use SIMD instructions for parallel comparison when possible
-  return p1.x.IsEqual((Int *)&p2.x) && p1.y.IsEqual((Int *)&p2.y) &&
-         p1.z.IsEqual((Int *)&p2.z);
-}
-
-}  // namespace PointAVX512
