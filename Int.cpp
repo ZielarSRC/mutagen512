@@ -1390,18 +1390,18 @@ void Int::ECPointDoubleK1AVX512(Int *x, Int *y, Int *z) {
     } else {
         // Add p then divide by 2
         static Int secp256k1_p_plus_1;
-    static bool secp256k1_p_plus_1_initialized = false;
-    if (!secp256k1_p_plus_1_initialized) {
-        secp256k1_p_plus_1.bits64[0] = 0x7FFFFFFF7FFFFE18ULL;
-        secp256k1_p_plus_1.bits64[1] = 0x0ULL;
-        secp256k1_p_plus_1.bits64[2] = 0x0ULL;
-        secp256k1_p_plus_1.bits64[3] = 0x8000000000000000ULL;
-        secp256k1_p_plus_1.bits64[4] = 0x0ULL;
-        secp256k1_p_plus_1_initialized = true;
-    }
+        static bool secp256k1_p_plus_1_initialized = false;
+        if (!secp256k1_p_plus_1_initialized) {
+            secp256k1_p_plus_1.bits64[0] = 0x7FFFFFFF7FFFFE18ULL;
+            secp256k1_p_plus_1.bits64[1] = 0x0ULL;
+            secp256k1_p_plus_1.bits64[2] = 0x0ULL;
+            secp256k1_p_plus_1.bits64[3] = 0x8000000000000000ULL;
+            secp256k1_p_plus_1.bits64[4] = 0x0ULL;
+            secp256k1_p_plus_1_initialized = true;
+        }
         Int temp_const;
-    temp_const.Set(&secp256k1_p_plus_1);
-    temp.Add(&temp_const);
+        temp_const.Set(&secp256k1_p_plus_1);
+        temp.Add(&temp_const);
         temp.ShiftR(1);
     }
     
@@ -1553,7 +1553,7 @@ void Int::ECBatchMulK1AVX512(Int *scalars, Int *base_x, Int *base_y, Int *base_z
         
         // Process batch
         for (int j = 0; j < remaining; j++) {
-            ECPointMulK1AVX512(&scalars[i + j], &base_x[i + j], &base_y[i + j], &base_z[i + j],
+            Int::ECPointMulK1AVX512(&scalars[i + j], &base_x[i + j], &base_y[i + j], &base_z[i + j],
                                &result_x[i + j], &result_y[i + j], &result_z[i + j]);
         }
         
@@ -1611,7 +1611,8 @@ bool Int::IsProbablePrime() {
     for (int i = 0; i < sizeof(small_primes)/sizeof(small_primes[0]); i++) {
         Int temp;
         temp.Set(this);
-        temp.Mod(&Int(small_primes[i]));
+        Int prime_int((uint64_t)small_primes[i]);
+        temp.Mod(&prime_int);
         if (temp.IsZero()) return false;
     }
     
@@ -1654,7 +1655,7 @@ bool Int::IsProbablePrime() {
 }
 
 // Memory fence for ensuring AVX-512 operations complete
-inline void Int::MemoryFenceAVX512() {
+void Int::MemoryFenceAVX512() {
     _mm_mfence();
     _mm256_zeroupper(); // Clear upper AVX state
 }
