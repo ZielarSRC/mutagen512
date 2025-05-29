@@ -81,7 +81,6 @@ Point Secp256K1::AddDirect(Point &p1, Point &p2) {
 
   _p.ModSquareK1(&_s);
 
-  _p.Sub(&_s);
   _p.Sub(&p1.x);
   _p.Sub(&p2.x);
   r.x.Set(&_p);
