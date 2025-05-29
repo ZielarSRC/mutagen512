@@ -24,7 +24,7 @@ Point Secp256K1::ComputePublicKey(Int *privKey) {
   int i = 0;
   uint8_t b;
   Point result;
-  const Point &gen = G;
+  Point gen = G;  // Tworzymy kopię G, by móc przekazać jako non-const referencję
   result.Clear();
 
   // Search for the MSB
@@ -136,11 +136,15 @@ Point Secp256K1::DoubleDirect(Point &p) {
   Int _p;
   Int a;
   Int d;
+  Int three;
   Point r;
   r.z.SetInt32(1);
 
+  // Ustawiamy wartość 3 jako Int zamiast przekazywać uint64_t
+  three.SetInt32(3);
+
   _s.ModSquareK1(&p.x);
-  _p.ModMulK1(&_s, (uint64_t)3);
+  _p.ModMulK1(&_s, &three);  // Używamy obiektu Int zamiast (uint64_t)3
   _s.ModSquareK1(&p.y);
   d.ModMulK1(&p.x, &_s);
   d.ShiftL(2);
@@ -161,8 +165,12 @@ Point Secp256K1::DoubleDirect(Point &p) {
 Point Secp256K1::DoubleDirectAVX512(Point &p) {
   // Funkcja dla CPU Sapphire Rapids z AVX-512
   Int _s, _p, a, d;
+  Int three;
   Point r;
   r.z.SetInt32(1);
+
+  // Ustawiamy wartość 3 jako Int zamiast przekazywać uint64_t
+  three.SetInt32(3);
 
   // Wczytanie danych z użyciem _mm512_loadu_si512 zamiast _mm512_stream_load_si512
   __m512i px_vec = _mm512_loadu_si512((__m512i const *)p.x.bits64);
@@ -172,7 +180,7 @@ Point Secp256K1::DoubleDirectAVX512(Point &p) {
   _s.ModSquareK1(&p.x);
 
   // _p = 3*x^2
-  _p.ModMulK1(&_s, (uint64_t)3);
+  _p.ModMulK1(&_s, &three);  // Używamy obiektu Int zamiast (uint64_t)3
 
   // _s = y^2
   _s.ModSquareK1(&p.y);
@@ -248,7 +256,7 @@ Point Secp256K1::ScalarMultiplication(Point &p, Int *scalar, bool isBatchMode) {
   Point *R[2] = {&R0, &R1};
 
   R0.Clear();
-  R1.Set(&p);
+  R1.Set(p);  // Używamy Set(Point&) zamiast Set(Point*)
 
   uint8_t binary[32];
   scalar->Get32Bytes(binary);
@@ -281,7 +289,7 @@ void Secp256K1::Check() {
   x.SetBase16((char *)"79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
   y.SetBase16((char *)"483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
   z.SetInt32(1);
-  Point G(x, y, z);
+  Point G(x, y, z);  // Używamy konstruktora z referencjami
   G.Reduce();
   G = DoubleDirect(G);
   // 2G=
@@ -289,7 +297,7 @@ void Secp256K1::Check() {
   // 16 33 11 32 9D B5 5E 33 15 F1 4B 48 C5 57 6B 3F 4C BD A0 B3 82 CD 24 B3 BC B1 BD 6A 28 2A 06 15
   x.SetBase16((char *)"79C5C3C5D7D5B5DF339337EF14C5474B0A987BF5F91041092477895EA0190C56");
   y.SetBase16((char *)"1506282A6ABD1BBCB324CD82B3A0BD4C3F6B57C5484BF11533B59D320B333116");
-  Point checkG(x, y, z);
+  Point checkG(x, y, z);  // Używamy konstruktora z referencjami
   if (checkG.x.IsEqual(&G.x) && checkG.y.IsEqual(&G.y))
     printf("Generator Ok!\n");
   else
@@ -376,7 +384,11 @@ Point Secp256K1::AddJacobian(Point &p1, Point &p2) {
 Point Secp256K1::DoubleJacobian(Point &p) {
   // Implementacja podwajania w koordynatach Jacobian
   Int S, M, Y2, TEMP;
+  Int three;
   Point r;
+
+  // Inicjalizacja stałej 3
+  three.SetInt32(3);
 
   if (p.z.IsZero()) {
     r.z.SetInt32(0);
@@ -389,8 +401,7 @@ Point Secp256K1::DoubleJacobian(Point &p) {
   S.ShiftL(2);
 
   M.ModSquareK1(&p.x);
-  TEMP.SetInt32(3);
-  M.ModMulK1(&M, &TEMP);
+  M.ModMulK1(&M, &three);  // Używamy obiektu Int zamiast (uint64_t)3
 
   r.x.ModSquareK1(&M);
   r.x.Sub(&r.x, &S);
@@ -421,10 +432,14 @@ bool Secp256K1::VerifySignature(Int &hash, Int &r, Int &s, Point &pubKey) {
   w.ModInv();
 
   Int u1;
-  u1.ModMulK1order(&hash, &w);
+  // Poprawiamy wywołanie ModMulK1order
+  u1.Set(&hash);
+  u1.ModMulK1order(&w);
 
   Int u2;
-  u2.ModMulK1order(&r, &w);
+  // Poprawiamy wywołanie ModMulK1order
+  u2.Set(&r);
+  u2.ModMulK1order(&w);
 
   Point p1 = ScalarMultiplication(G, &u1, false);
   Point p2 = ScalarMultiplication(pubKey, &u2, false);
@@ -487,7 +502,9 @@ void Secp256K1::SNARK_Proof(Int &x, Int &y, Int &r) {
 
   // Response: s = k - c*x mod order
   Int temp;
-  temp.ModMulK1order(&c, &x);
+  // Poprawiamy wywołanie ModMulK1order
+  temp.Set(&c);
+  temp.ModMulK1order(&x);
 
   r.Set(&k);
   r.Sub(&temp);
@@ -510,10 +527,14 @@ bool Secp256K1::BatchVerify(int batchSize, Point *publicKeys, Int *hashes, Int *
     sInv.ModInv();
 
     Int u1;
-    u1.ModMulK1order(&hashes[i], &sInv);
+    // Poprawiamy wywołanie ModMulK1order
+    u1.Set(&hashes[i]);
+    u1.ModMulK1order(&sInv);
 
     Int u2;
-    u2.ModMulK1order(&rs[i], &sInv);
+    // Poprawiamy wywołanie ModMulK1order
+    u2.Set(&rs[i]);
+    u2.ModMulK1order(&sInv);
 
     Point p1 = ScalarMultiplication(G, &u1, true);
     Point p2 = ScalarMultiplication(publicKeys[i], &u2, true);
