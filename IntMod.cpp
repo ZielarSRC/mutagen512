@@ -902,7 +902,7 @@ static Int *_O;                                 // SecpK1 order
 
 void Int::InitK1(Int *order) {
   _O = order;
-  _R2o.SetBase16("9D671CD581C69BC5E697F5E45BCD07C6741496C20E7CF878896CF21467D7D140");
+  _R2o.SetBase16((char*)"9D671CD581C69BC5E697F5E45BCD07C6741496C20E7CF878896CF21467D7D140");
 }
 
 void Int::ModAddK1order(Int *a, Int *b) {
