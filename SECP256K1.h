@@ -1,74 +1,61 @@
-#ifndef SECP256K1H
-#define SECP256K1H
+#ifndef SECP256K1_H
+#define SECP256K1_H
 
-#include <immintrin.h>
-
+#include <stdlib.h>
+#include <stdint.h>
 #include <string>
-#include <vector>
-
+#include <stdio.h>
+#include "Int.h"
 #include "Point.h"
+#include "IntGroup.h"
 
-// Address type
-#define P2PKH 0
-#define P2SH 1
-#define BECH32 2
-
-// Alignment for AVX-512 operations
-#define AVX512_ALIGNMENT 64
+// Secp256K1 Elliptic Curve
+// y^2 = x^3 + 7
+// Finite field: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+// Order:        FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+// Generator:    G=(79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+//                  483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
 
 class Secp256K1 {
- public:
+
+public:
+
   Secp256K1();
-  ~Secp256K1();
   void Init();
   Point ComputePublicKey(Int *privKey);
-  Point NextKey(Point &key);
   void Check();
-  bool EC(Point &p);
   Int GetY(Int x, bool isEven);
-
-  // Batch operations optimized for AVX-512
-  void BatchComputePublicKeys(Int *privKeys, Point *pubKeys, int batchSize);
-
-  // AVX-512 optimized versions of key operations
-  Point AddDirectAVX512(Point &p1, Point &p2);
-  Point DoubleDirectAVX512(Point &p);
-
-  void GetHash160(int type, bool compressed, Point &k0, Point &k1, Point &k2, Point &k3,
-                  uint8_t *h0, uint8_t *h1, uint8_t *h2, uint8_t *h3);
-
-  void GetHash160(int type, bool compressed, Point &pubKey, unsigned char *hash);
-
-  std::string GetAddress(int type, bool compressed, Point &pubKey);
-  std::string GetAddress(int type, bool compressed, unsigned char *hash160);
-  std::vector<std::string> GetAddress(int type, bool compressed, unsigned char *h1,
-                                      unsigned char *h2, unsigned char *h3, unsigned char *h4);
-  std::string GetPrivAddress(bool compressed, Int &privKey);
-  std::string GetPublicKeyHex(bool compressed, Point &p);
-  Point ParsePublicKeyHex(std::string str, bool &isCompressed);
-
-  bool CheckPudAddress(std::string address);
-
-  static Int DecodePrivateKey(char *key, bool *compressed);
-
-  // Standard operations
-  Point Add(Point &p1, Point &p2);
-  Point Add2(Point &p1, Point &p2);
+  bool EC(Int &x, Int &y);
+  
+  // Dodawanie i podwajanie punktów
   Point AddDirect(Point &p1, Point &p2);
-  Point Double(Point &p);
+  Point AddDirectAVX512(Point &p1, Point &p2);
   Point DoubleDirect(Point &p);
+  Point DoubleDirectAVX512(Point &p);
+  Point AddJacobian(Point &p1, Point &p2);
+  Point DoubleJacobian(Point &p);
+  
+  // Operacje na punktach
+  Point NextKey(Point &key);
+  bool PointAtInfinity(Point &p);
+  void PrefetchPoint(const Point& p, int hint);
+  
+  // Mnożenie skalarne
+  Point ScalarMultiplication(Point &p, Int *scalar, bool isBatchMode = false);
+  
+  // Operacje na podpisach
+  bool VerifySignature(Int &hash, Int &r, Int &s, Point &pubKey);
+  bool BatchVerify(int batchSize, Point *publicKeys, Int *hashes, Int *rs, Int *ss);
+  void SNARK_Proof(Int &x, Int &y, Int &r);
+  
+  // Kompresja i dekompresja punktów
+  Point CompressPoint(Point &p);
+  Point DecompressPoint(Point &compressedPoint);
 
-  Point G;    // Generator
-  Int order;  // Curve order
-
- private:
-  uint8_t GetByte(std::string &str, int idx);
-
-  // Helper methods for AVX-512 optimizations
-  void PrefetchPoint(const Point &p, int hint = _MM_HINT_T0);
-  bool ShouldUsePrefetch(const Point &p1, const Point &p2);
-
-  alignas(AVX512_ALIGNMENT) Point GTable[256 * 32];  // Generator table aligned for AVX-512
+  // Pola publiczne
+  Int P;      // Characteristic of the finite field
+  Int order;  // Order of the generator point
+  Point G;    // Generator point
 };
 
-#endif  // SECP256K1H
+#endif // SECP256K1_H
