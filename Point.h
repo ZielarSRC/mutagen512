@@ -2,7 +2,6 @@
 #define POINTH
 
 #include "Int.h"
-#include <immintrin.h>
 
 class Point {
 
