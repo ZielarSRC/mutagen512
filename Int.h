@@ -167,11 +167,10 @@ class Int {
   static Int P;
 
   // Align for optimal AVX-512 performance on Sapphire Rapids
-  alignas(64) union {
+  union alignas(64) {
     uint32_t bits[NB32BLOCK];
     uint64_t bits64[NB64BLOCK];
   };
-
  private:
   void MatrixVecMul(Int *u, Int *v, int64_t _11, int64_t _12, int64_t _21, int64_t _22,
                     uint64_t *cu, uint64_t *cv);
