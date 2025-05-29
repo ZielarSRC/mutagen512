@@ -1115,15 +1115,15 @@ void Int::SetBase10(char *value) {
 
 // ------------------------------------------------
 
-void Int::SetBase16(char *value) { SetBaseN(16, "0123456789ABCDEF", value); }
+void Int::SetBase16(char *value) { SetBaseN(16, (char*)"0123456789ABCDEF", value); }
 
 // ------------------------------------------------
 
-std::string Int::GetBase10() { return GetBaseN(10, "0123456789"); }
+std::string Int::GetBase10() { return GetBaseN(10, (char*)"0123456789"); }
 
 // ------------------------------------------------
 
-std::string Int::GetBase16() { return GetBaseN(16, "0123456789ABCDEF"); }
+std::string Int::GetBase16() { return GetBaseN(16, (char*)"0123456789ABCDEF"); }
 
 // ------------------------------------------------
 
@@ -1309,54 +1309,67 @@ void Int::ModSquareK1(Int *a) {
 // ------------------------------------------------
 
 bool Int::IsProbablePrime() {
-  // Basic prime testing
-  if (IsEven()) return IsEqual(&_ONE);
-
-  // Check small primes first
-  Int R;
-  for (uint64_t i = 3; i < 1000; i += 2) {
-    R.Set(this);
-    R.Mod((uint64_t)i);
-    if (R.IsZero() && !this->IsEqual((uint64_t)i)) return false;
-  }
-
-  // Miller-Rabin test
-  Int n1;
-  n1.Set(this);
-  n1.SubOne();
-
-  int r = 0;
-  Int d;
-  d.Set(&n1);
-  while (d.IsEven()) {
-    d.ShiftR(1);
-    r++;
-  }
-
-  // Test with bases 2, 3, 5, 7, 11, 13, 17, 19, 23, 29
-  Int a;
-  Int x;
-  for (int i = 0; i < 10; i++) {
-    a.Set((uint64_t)primes[i]);
-    if (a.IsGreater(this)) break;
-
-    x.Set(&a);
-    x.ModExp(&d, this);
-
-    if (x.IsEqual(&_ONE) || x.IsEqual(&n1)) continue;
-
-    bool isPrime = false;
-    for (int j = 0; j < r - 1; j++) {
-      x.ModSquareK1(&x);
-      x.Mod(this);
-      if (x.IsEqual(&n1)) {
-        isPrime = true;
-        break;
-      }
+    // Basic prime testing
+    if (IsEven()) 
+        return IsEqual(&_ONE);
+    
+    // Check small primes first
+    Int R;
+    Int tempI;
+    for (uint64_t i = 3; i < 1000; i += 2) {
+        tempI.SetInt32((uint32_t)i); // Tworzenie Int z i
+        R.Set(this);
+        R.Mod(&tempI); // Używamy obiektu Int zamiast bezpośrednio uint64_t
+        tempI.SetInt32((uint32_t)i); // Reset tempI po użyciu
+        if (R.IsZero() && !this->IsEqual(&tempI))
+            return false;
     }
-
-    if (!isPrime) return false;
-  }
-
-  return true;
+    
+    // Tablica małych liczb pierwszych
+    static const uint64_t smallPrimes[] = {
+        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53
+    };
+    
+    // Miller-Rabin test
+    Int n1;
+    n1.Set(this);
+    n1.SubOne();
+    
+    int r = 0;
+    Int d;
+    d.Set(&n1);
+    while (d.IsEven()) {
+        d.ShiftR(1);
+        r++;
+    }
+    
+    // Test with bases from smallPrimes array
+    Int a;
+    Int x;
+    for (int i = 0; i < 10 && i < (int)(sizeof(smallPrimes)/sizeof(smallPrimes[0])); i++) {
+        a.SetInt32((uint32_t)smallPrimes[i]);
+        if (a.IsGreater(this))
+            break;
+        
+        x.Set(&a);
+        x.ModExp(&d); // Używamy poprawnego wywołania ModExp z jednym argumentem
+        
+        if (x.IsEqual(&_ONE) || x.IsEqual(&n1))
+            continue;
+        
+        bool isPrime = false;
+        for (int j = 0; j < r - 1; j++) {
+            x.ModSquareK1(&x);
+            x.Mod(this);
+            if (x.IsEqual(&n1)) {
+                isPrime = true;
+                break;
+            }
+        }
+        
+        if (!isPrime)
+            return false;
+    }
+    
+    return true;
 }
