@@ -1,10 +1,11 @@
+#include <immintrin.h>
+
 #include "Point.h"
 
 Point::Point() {}
 
 Point::Point(const Point &p) {
 // Selektywny prefetch tylko dla dużych bloków danych
-// dla procesora Sapphire Rapids
 #if NB64BLOCK > 5
   _mm_prefetch((const char *)p.x.bits64, _MM_HINT_T0);
   _mm_prefetch((const char *)p.y.bits64, _MM_HINT_T0);
@@ -38,6 +39,32 @@ Point::Point(Int *cx, Int *cz) {
 
   x.Set(cx);
   z.Set(cz);
+}
+
+// Konstruktory przyjmujące referencje
+Point::Point(Int &cx, Int &cy, Int &cz) {
+// Selektywny prefetch tylko dla dużych bloków danych
+#if NB64BLOCK > 5
+  _mm_prefetch((const char *)cx.bits64, _MM_HINT_T0);
+  _mm_prefetch((const char *)cy.bits64, _MM_HINT_T0);
+  _mm_prefetch((const char *)cz.bits64, _MM_HINT_T0);
+#endif
+
+  x.Set(&cx);
+  y.Set(&cy);
+  z.Set(&cz);
+}
+
+Point::Point(Int &cx, Int &cy) {
+// Selektywny prefetch tylko dla dużych bloków danych
+#if NB64BLOCK > 5
+  _mm_prefetch((const char *)cx.bits64, _MM_HINT_T0);
+  _mm_prefetch((const char *)cy.bits64, _MM_HINT_T0);
+#endif
+
+  x.Set(&cx);
+  y.Set(&cy);
+  z.SetInt32(1);  // Domyślnie ustawiamy z=1
 }
 
 void Point::Clear() {
@@ -84,15 +111,28 @@ void Point::Reduce() {
   _mm_prefetch((const char *)z.bits64, _MM_HINT_T0);
 #endif
 
+  // Sprawdzenie czy z jest różne od zera
+  if (z.IsZero()) {
+    // Punkt w nieskończoności
+    Clear();
+    return;
+  }
+
   Int i(&z);
   i.ModInv();
 
-  // Używamy zoptymalizowanych operacji ModMulK1 dla secp256k1
-  // które wykorzystują AVX-512 na procesorze Sapphire Rapids
-  x.ModMulK1(&x, &i);
-  y.ModMulK1(&y, &i);
+  // Używamy konwersji z uint64_t na Int zamiast przekazywania jako wskaźnik
+  Int tmp;
 
-  // Automatyczna redukcja już zawarta w ModMulK1
+  // x = x * z^-1 mod P
+  tmp.ModMulK1(&x, &i);
+  x.Set(&tmp);
+
+  // y = y * z^-1 mod P
+  tmp.ModMulK1(&y, &i);
+  y.Set(&tmp);
+
+  // z = 1
   z.SetInt32(1);
 }
 
