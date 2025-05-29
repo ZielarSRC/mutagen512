@@ -68,11 +68,10 @@ Point::Point(Int &cx, Int &cy) {
 }
 
 void Point::Clear() {
-  // Używamy istniejących metod z Int, które są już zoptymalizowane
-  // dla procesora Sapphire Rapids w pliku Int.cpp
-  x.CLEAR();
-  y.CLEAR();
-  z.CLEAR();
+  // Używamy publicznych metod zamiast prywatnej CLEAR()
+  x.SetInt32(0);
+  y.SetInt32(0);
+  z.SetInt32(0);
 }
 
 void Point::Set(Int *cx, Int *cy, Int *cz) {
