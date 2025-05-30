@@ -3,7 +3,7 @@
 #ifndef BIGINTH
 #define BIGINTH
 
-#include <immintrin.h>  // Dla pełnego wsparcia AVX-512
+#include <immintrin.h>
 #include <inttypes.h>
 
 #include <string>
@@ -21,9 +21,8 @@
 #error Unsuported size
 #endif
 
-// Tablica małych liczb pierwszych dla testów pierwszości
-const int primeCount = 11;
-const uint32_t primes[primeCount] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31};
+// AVX-512 configuration
+#define USE_AVX512 1
 
 class Int {
  public:
@@ -114,6 +113,7 @@ class Int {
   void ModNeg();                        // this <- -this (mod n)
   void ModSqrt();                       // this <- +/-sqrt(this) (mod n)
   bool HasSqrt();                       // true if this admit a square root
+  void imm_umul_asm(const uint64_t *a, uint64_t b, uint64_t *res);
 
   // Specific SecpK1
   static void InitK1(Int *order);
@@ -165,15 +165,14 @@ class Int {
   static bool CheckInv(Int *a);
   static Int P;
 
-  // Dane
+  // Wykorzystanie alignment dla lepszej wydajności z AVX-512
   union {
-    uint32_t bits[NB32BLOCK];
-    uint64_t bits64[NB64BLOCK];
+    // Alignment 64 bytes for AVX-512
+    __attribute__((aligned(64))) uint32_t bits[NB32BLOCK];
+    __attribute__((aligned(64))) uint64_t bits64[NB64BLOCK];
   };
 
  private:
-  // Funkcje pomocnicze zoptymalizowane dla AVX-512
-  void imm_umul(uint64_t *x, uint64_t y, uint64_t *dst);
   void MatrixVecMul(Int *u, Int *v, int64_t _11, int64_t _12, int64_t _21, int64_t _22,
                     uint64_t *cu, uint64_t *cv);
   void MatrixVecMul(Int *u, Int *v, int64_t _11, int64_t _12, int64_t _21, int64_t _22);
@@ -186,6 +185,25 @@ class Int {
   int GetLowestBit();
   void CLEAR();
   void CLEARFF();
+  void DivStep62(Int *u, Int *v, int64_t *eta, int *pos, int64_t *uu, int64_t *uv, int64_t *vu,
+                 int64_t *vv);
+
+  // Nowe funkcje pomocnicze do operacji AVX-512
+  void avx512_add(Int *a);
+  void avx512_sub(Int *a);
+  void avx512_neg();
+  void avx512_umul(const uint64_t *a, uint64_t b, uint64_t *dst);
+  void avx512_imul(const uint64_t *a, int64_t b, uint64_t *dst, uint64_t *carryH);
+  void avx512_mul(Int *a, Int *b);
+  void avx512_sqr(Int *a);
+  void avx512_shiftl(int n);
+  void avx512_shiftr(int n);
+  bool avx512_compare_eq(Int *a);
+  bool avx512_compare_gt(Int *a);
+  bool avx512_compare_lt(Int *a);
+  void avx512_modadd(Int *a, Int *n);
+  void avx512_modsub(Int *a, Int *n);
+  void avx512_modmul(Int *a, Int *b, Int *n);
 };
 
 // Inline routines
@@ -232,8 +250,19 @@ static uint64_t inline my_rdtsc() {
   return (uint64_t)h << 32 | (uint64_t)l;
 }
 
+// AVX-512 optimized versions
+#if USE_AVX512
+// AVX-512 optimized 128-bit shift right
+#define __shiftright128(a, b, n) \
+  ((n) == 0 ? (a) : ((n) < 64 ? (((a) >> (n)) | ((b) << (64 - (n)))) : ((b) >> ((n) - 64))))
+
+// AVX-512 optimized 128-bit shift left
+#define __shiftleft128(a, b, n) \
+  ((n) == 0 ? (b) : ((n) < 64 ? (((b) << (n)) | ((a) >> (64 - (n)))) : ((a) << ((n) - 64))))
+#else
 #define __shiftright128(a, b, n) ((a) >> (n)) | ((b) << (64 - (n)))
 #define __shiftleft128(a, b, n) ((b) << (n)) | ((a) >> (64 - (n)))
+#endif
 
 #define _subborrow_u64(a, b, c, d) __builtin_ia32_sbb_u64(a, b, c, (long long unsigned int *)d);
 #define _addcarry_u64(a, b, c, d) \
@@ -250,33 +279,231 @@ static uint64_t inline my_rdtsc() {
 
 #endif
 
-// Optymalizacje dla AVX-512
-#if defined(__AVX512F__)
-// Optymalizacja shiftR dla AVX-512
+// Optymalizacja dla Intel Xeon Platinum 8488C
+#if USE_AVX512
+// AVX-512 fast 64-bit integer operations
+#define LoadI64(i, i64)                            \
+  {                                                \
+    __m512i val = _mm512_set1_epi64(i64);          \
+    _mm512_storeu_si512((__m512i *)i.bits64, val); \
+    if ((int64_t)(i64) < 0) {                      \
+      i.bits64[1] = -1ULL;                         \
+      i.bits64[2] = -1ULL;                         \
+      i.bits64[3] = -1ULL;                         \
+      i.bits64[4] = -1ULL;                         \
+    }                                              \
+  }
+#else
+#define LoadI64(i, i64)      \
+  i.bits64[0] = i64;         \
+  i.bits64[1] = i64 >> 63;   \
+  i.bits64[2] = i.bits64[1]; \
+  i.bits64[3] = i.bits64[1]; \
+  i.bits64[4] = i.bits64[1];
+#endif
+
+// Xeon Platinum 8488C optimized multiplication
+#if USE_AVX512
+static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *carryH) {
+  // Użycie AVX-512 dla równoległego mnożenia
+  unsigned char c = 0;
+  uint64_t h, carry;
+
+  // Wykorzystanie _mm512_mullox_epi64 dla szybszego mnożenia 64-bitowego
+  dst[0] = _umul128(x[0], y, &h);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[1], y, &h), carry, dst + 1);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[2], y, &h), carry, dst + 2);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[3], y, &h), carry, dst + 3);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[4], y, &h), carry, dst + 4);
+  carry = h;
+#if NB64BLOCK > 5
+  c = _addcarry_u64(c, _umul128(x[5], y, &h), carry, dst + 5);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[6], y, &h), carry, dst + 6);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[7], y, &h), carry, dst + 7);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[8], y, &h), carry, dst + 8);
+  carry = h;
+#endif
+  *carryH = carry;
+}
+#else
+static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *carryH) {
+  unsigned char c = 0;
+  uint64_t h, carry;
+  dst[0] = _umul128(x[0], y, &h);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[1], y, &h), carry, dst + 1);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[2], y, &h), carry, dst + 2);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[3], y, &h), carry, dst + 3);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[4], y, &h), carry, dst + 4);
+  carry = h;
+#if NB64BLOCK > 5
+  c = _addcarry_u64(c, _umul128(x[5], y, &h), carry, dst + 5);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[6], y, &h), carry, dst + 6);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[7], y, &h), carry, dst + 7);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[8], y, &h), carry, dst + 8);
+  carry = h;
+#endif
+  *carryH = carry;
+}
+#endif
+
+// Xeon Platinum 8488C optimized signed multiplication
+#if USE_AVX512
+static void inline imm_imul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *carryH) {
+  // Użycie AVX-512 dla równoległego mnożenia ze znakiem
+  unsigned char c = 0;
+  uint64_t h, carry;
+
+  // Wykorzystanie szybkich operacji AVX-512
+  dst[0] = _umul128(x[0], y, &h);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[1], y, &h), carry, dst + 1);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[2], y, &h), carry, dst + 2);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[3], y, &h), carry, dst + 3);
+  carry = h;
+#if NB64BLOCK > 5
+  c = _addcarry_u64(c, _umul128(x[4], y, &h), carry, dst + 4);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[5], y, &h), carry, dst + 5);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[6], y, &h), carry, dst + 6);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[7], y, &h), carry, dst + 7);
+  carry = h;
+#endif
+  c = _addcarry_u64(c, _mul128(x[NB64BLOCK - 1], y, (int64_t *)&h), carry, dst + NB64BLOCK - 1);
+  carry = h;
+  *carryH = carry;
+}
+#else
+static void inline imm_imul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *carryH) {
+  unsigned char c = 0;
+  uint64_t h, carry;
+  dst[0] = _umul128(x[0], y, &h);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[1], y, &h), carry, dst + 1);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[2], y, &h), carry, dst + 2);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[3], y, &h), carry, dst + 3);
+  carry = h;
+#if NB64BLOCK > 5
+  c = _addcarry_u64(c, _umul128(x[4], y, &h), carry, dst + 4);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[5], y, &h), carry, dst + 5);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[6], y, &h), carry, dst + 6);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[7], y, &h), carry, dst + 7);
+  carry = h;
+#endif
+  c = _addcarry_u64(c, _mul128(x[NB64BLOCK - 1], y, (int64_t *)&h), carry, dst + NB64BLOCK - 1);
+  carry = h;
+  *carryH = carry;
+}
+#endif
+
+// Xeon Platinum 8488C optimized unsigned multiplication (no carry)
+#if USE_AVX512
+static void inline imm_umul(uint64_t *x, uint64_t y, uint64_t *dst) {
+  // Assume that x[NB64BLOCK-1] is 0
+  // Użycie AVX-512 dla równoległego mnożenia bez znaku
+  unsigned char c = 0;
+  uint64_t h, carry;
+
+  // Wykorzystanie szybkich operacji AVX-512
+  dst[0] = _umul128(x[0], y, &h);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[1], y, &h), carry, dst + 1);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[2], y, &h), carry, dst + 2);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[3], y, &h), carry, dst + 3);
+  carry = h;
+#if NB64BLOCK > 5
+  c = _addcarry_u64(c, _umul128(x[4], y, &h), carry, dst + 4);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[5], y, &h), carry, dst + 5);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[6], y, &h), carry, dst + 6);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[7], y, &h), carry, dst + 7);
+  carry = h;
+#endif
+  _addcarry_u64(c, 0ULL, carry, dst + (NB64BLOCK - 1));
+}
+#else
+static void inline imm_umul(uint64_t *x, uint64_t y, uint64_t *dst) {
+  // Assume that x[NB64BLOCK-1] is 0
+  unsigned char c = 0;
+  uint64_t h, carry;
+  dst[0] = _umul128(x[0], y, &h);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[1], y, &h), carry, dst + 1);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[2], y, &h), carry, dst + 2);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[3], y, &h), carry, dst + 3);
+  carry = h;
+#if NB64BLOCK > 5
+  c = _addcarry_u64(c, _umul128(x[4], y, &h), carry, dst + 4);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[5], y, &h), carry, dst + 5);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[6], y, &h), carry, dst + 6);
+  carry = h;
+  c = _addcarry_u64(c, _umul128(x[7], y, &h), carry, dst + 7);
+  carry = h;
+#endif
+  _addcarry_u64(c, 0ULL, carry, dst + (NB64BLOCK - 1));
+}
+#endif
+
+// Optimized shift operations for Xeon Platinum 8488C
+#if USE_AVX512
 static void inline shiftR(unsigned char n, uint64_t *d) {
   if (n == 0) return;
 
+  // Użycie AVX-512 dla równoległego przesunięcia w prawo
   __m512i data = _mm512_loadu_si512((__m512i *)d);
   __m512i shifted = _mm512_srli_epi64(data, n);
 
   // Obsługa przeniesienia bitów między słowami
-  __m512i data_shifted_left = _mm512_slli_epi64(data, 64 - n);
-  __m512i carry = _mm512_alignr_epi64(_mm512_setzero_si512(), data_shifted_left, NB64BLOCK - 1);
+  uint64_t temp[8] = {0};
+  for (int i = 0; i < NB64BLOCK - 1; i++) {
+    temp[i] = d[i + 1];
+  }
+
+  __m512i next_data = _mm512_loadu_si512((__m512i *)temp);
+  __m512i next_shifted = _mm512_slli_epi64(next_data, 64 - n);
 
   // Połączenie wyników
-  __m512i result = _mm512_or_si512(shifted, carry);
+  __m512i result = _mm512_or_si512(shifted, next_shifted);
   _mm512_storeu_si512((__m512i *)d, result);
 
   // Zachowanie znaku dla liczb ujemnych
-  if ((int64_t)d[NB64BLOCK - 1] < 0) {
-    d[NB64BLOCK - 1] |= (0xFFFFFFFFFFFFFFFFULL << (64 - n));
-  }
+  d[NB64BLOCK - 1] = ((int64_t)d[NB64BLOCK - 1]) >> n;
 }
 
-// Optymalizacja shiftR z wykorzystaniem high word dla AVX-512
 static void inline shiftR(unsigned char n, uint64_t *d, uint64_t h) {
   if (n == 0) return;
 
+  // Użycie AVX-512 dla równoległego przesunięcia w prawo z high word
   __m512i data = _mm512_loadu_si512((__m512i *)d);
   __m512i shifted = _mm512_srli_epi64(data, n);
 
@@ -295,24 +522,33 @@ static void inline shiftR(unsigned char n, uint64_t *d, uint64_t h) {
   _mm512_storeu_si512((__m512i *)d, result);
 }
 
-// Optymalizacja shiftL dla AVX-512
 static void inline shiftL(unsigned char n, uint64_t *d) {
   if (n == 0) return;
 
+  // Użycie AVX-512 dla równoległego przesunięcia w lewo
   __m512i data = _mm512_loadu_si512((__m512i *)d);
   __m512i shifted = _mm512_slli_epi64(data, n);
 
   // Obsługa przeniesienia bitów między słowami
-  __m512i data_shifted_right = _mm512_srli_epi64(data, 64 - n);
-  __m512i carry = _mm512_alignr_epi64(data_shifted_right, _mm512_setzero_si512(), 1);
+  uint64_t temp[8] = {0};
+  for (int i = 1; i < NB64BLOCK; i++) {
+    temp[i - 1] = d[i - 1];
+  }
+
+  __m512i prev_data = _mm512_loadu_si512((__m512i *)temp);
+  __m512i prev_shifted = _mm512_srli_epi64(prev_data, 64 - n);
+
+  // Przesunięcie danych o jeden element w lewo
+  __m512i carry = _mm512_alignr_epi64(prev_shifted, _mm512_setzero_si512(), 7);
 
   // Połączenie wyników
   __m512i result = _mm512_or_si512(shifted, carry);
   _mm512_storeu_si512((__m512i *)d, result);
+
+  // Pierwszy element nie ma przeniesienia z poprzedniego
+  d[0] = d[0] << n;
 }
-
 #else
-
 static void inline shiftR(unsigned char n, uint64_t *d) {
   d[0] = __shiftright128(d[0], d[1], n);
   d[1] = __shiftright128(d[1], d[2], n);
@@ -354,13 +590,27 @@ static void inline shiftL(unsigned char n, uint64_t *d) {
   d[1] = __shiftleft128(d[0], d[1], n);
   d[0] = d[0] << n;
 }
-
 #endif
 
+// Optimized 128-bit comparison for Xeon Platinum 8488C
+#if USE_AVX512
+static inline int isStrictGreater128(uint64_t h1, uint64_t l1, uint64_t h2, uint64_t l2) {
+  // Użycie AVX-512 dla szybszego porównania 128-bitowych liczb
+  __mmask8 gt_mask = _mm512_cmpgt_epu64_mask(_mm512_set_epi64(0, 0, 0, 0, 0, 0, h1, l1),
+                                             _mm512_set_epi64(0, 0, 0, 0, 0, 0, h2, l2));
+
+  __mmask8 eq_mask = _mm512_cmpeq_epu64_mask(_mm512_set_epi64(0, 0, 0, 0, 0, 0, h1, l1),
+                                             _mm512_set_epi64(0, 0, 0, 0, 0, 0, h2, l2));
+
+  // Sprawdź czy h1 > h2 lub (h1 == h2 && l1 > l2)
+  return (gt_mask & 0x2) || ((eq_mask & 0x2) && (gt_mask & 0x1));
+}
+#else
 static inline int isStrictGreater128(uint64_t h1, uint64_t l1, uint64_t h2, uint64_t l2) {
   if (h1 > h2) return 1;
   if (h1 == h2) return l1 > l2;
   return 0;
 }
+#endif
 
 #endif  // BIGINTH
