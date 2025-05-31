@@ -1,14 +1,12 @@
 #ifndef INTGROUPH
 #define INTGROUPH
 
-#include <immintrin.h>  // For AVX-512 intrinsics
-
 #include <vector>
 
 #include "Int.h"
 
 // Optimized for AVX-512 on Intel Xeon Platinum 8488C
-class alignas(64) IntGroup {
+class IntGroup {
  public:
   // Constructor with proper alignment for AVX-512
   IntGroup(int size);
@@ -25,7 +23,7 @@ class alignas(64) IntGroup {
 
  private:
   Int *ints;
-  alignas(64) Int *subp;  // Aligned for AVX-512
+  Int *subp;  // Aligned for AVX-512
   int size;
 
   // Helper methods for AVX-512 optimization
