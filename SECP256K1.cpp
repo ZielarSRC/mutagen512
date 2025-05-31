@@ -1,112 +1,238 @@
+#include <immintrin.h>  // Dla instrukcji AVX-512
+#include <omp.h>        // Dla OpenMP
 #include <string.h>
 
-#include "SECP256k1.h"
+#include "SECP256K1.h"
 
 Secp256K1::Secp256K1() {}
 
 void Secp256K1::Init() {
-  // Alokuj tymczasowe obiekty z wyrównaniem dla AVX-512
-  alignas(64) Point G_aligned;
-  alignas(64) Int order_aligned;
+  // Prime for the finite field
+  alignas(64) Int P;
+  P.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
 
-  // Inicjalizuj dane z wyrównaniem
-  G_aligned.x.SetBase16("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
-  G_aligned.y.SetBase16("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
+  // Set up field
+  Int::SetupField(&P);
+
+  // Generator point and order
+  // Deklaracja zmiennych tymczasowych z wyrównaniem 64 bajtów dla AVX-512
+  alignas(64) Int x_aligned, y_aligned, order_aligned;
+
+  // Inicjalizacja zmiennych tymczasowych
+  x_aligned.SetBase16("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
+  y_aligned.SetBase16("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
   order_aligned.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
-  // Przypisz do właściwych zmiennych
-  G = G_aligned;
+  // Prefetching dla lepszej wydajności pamięci
+  _mm_prefetch((const char *)&x_aligned, _MM_HINT_T0);
+  _mm_prefetch((const char *)&y_aligned, _MM_HINT_T0);
+
+  // Przypisanie do właściwych zmiennych
+  G.x = x_aligned;
+  G.y = y_aligned;
+  G.z.SetInt32(1);
   order = order_aligned;
 
   Int::InitK1(&order);
 
-  // Compute Generator table
+  // Compute Generator table - wykorzystanie OpenMP dla równoległego przetwarzania
   Point N(G);
-  for (int i = 0; i < 32; i++) {
-    GTable[i * 256] = N;
-    Point P(N);
-    for (int j = 1; j < 255; j++) {
-      P = P.Add(&N);
-      GTable[i * 256 + j] = P;
-    }
-    P = P.Add(&N);
-    N = P;
-  }
+  GTable[0] = N;
 
-  // Compute Lambda table for Endomorphism
-  // lambda = cubic_root_1 (cubic_root_1 = 1 mod p)
-  lambda.SetBase16("5363AD4CC05C30E0A5261C028812645A122E22EA20816678DF02967C1B23BD72");
-  lambdaB.SetBase16("AC9C52B33FA3CF1F5AD9E3FD77ED9BA4A880B9FC8EC739C2E0CFC810B51283CE");
-
-  Int kOrder;
-  kOrder.Set(&order);
-  kOrder.Add(&order);
-  kOrder.Add(&order);  // 3*order
-  beta.SetBase16("7AE96A2B657C07106E64479EAC3434E99CF0497512F58995C1396C28719501EE");
-  beta2.SetBase16("851695D49A83F8EF919BB86153CBCB16630FB68AED0A766A3EC693D68E6AFA40");
-
-  for (int i = 0; i < 256; i++) {
-    endomorphism[i] = new Point[256];
-    Point Z;
-    Z.Clear();
-    for (int j = 0; j < 256; j++) {
-      // Compute k1.G + k2.G^beta
-      Int k1;
-      Int k2;
-      k1.SetInt32(i);
-      k2.SetInt32(j);
-      k1.ShiftL(8);
-      k1.Add((uint64_t)j);
-      k2.ShiftL(16);
-      endomorphism[i][j].x.SetInt32(0);
-      endomorphism[i][j].y.SetInt32(0);
-      if (!k1.IsZero()) {
-        if (k1.IsOne()) {
-          endomorphism[i][j] = G;
-        } else {
-          endomorphism[i][j] = Double(&G);
-          for (int m = 1; m < k1.GetBitLength() - 1; m++) {
-            endomorphism[i][j] = Double(&endomorphism[i][j]);
-            if (k1.GetBit(k1.GetBitLength() - 1 - m)) {
-              endomorphism[i][j] = Add(&endomorphism[i][j], &G);
-            }
-          }
-        }
-      }
-
-      if (!k2.IsZero()) {
-        Point B;
-        B.x.Set(&G.x);
-        B.x.ModMul(&beta);
-        B.y.Set(&G.y);
-        if (k2.IsOne()) {
-          if (k1.IsZero()) {
-            endomorphism[i][j] = B;
+#pragma omp parallel
+  {
+#pragma omp single
+    {
+      for (int i = 0; i < 32; i++) {
+#pragma omp task firstprivate(i)
+        {
+          Point localN;
+          if (i == 0) {
+            localN = N;
           } else {
-            endomorphism[i][j] = Add(&endomorphism[i][j], &B);
+            localN = GTable[i * 256];
+            localN = DoubleDirect(localN);
           }
-        } else {
-          Point Q;
-          Q = Double(&B);
-          for (int m = 1; m < k2.GetBitLength() - 1; m++) {
-            Q = Double(&Q);
-            if (k2.GetBit(k2.GetBitLength() - 1 - m)) {
-              Q = Add(&Q, &B);
-            }
+
+          GTable[i * 256] = localN;
+
+          // Prefetch dla następnych iteracji
+          if (i < 31) {
+            _mm_prefetch((const char *)&GTable[(i + 1) * 256], _MM_HINT_T0);
           }
-          if (k1.IsZero()) {
-            endomorphism[i][j] = Q;
-          } else {
-            endomorphism[i][j] = Add(&endomorphism[i][j], &Q);
+
+          for (int j = 1; j < 255; j++) {
+            Point add = AddDirect(localN, GTable[i * 256]);
+            GTable[i * 256 + j] = add;
+            localN = add;
           }
+          GTable[i * 256 + 255] = localN;  // Dummy point for check function
         }
       }
     }
   }
 }
 
-Secp256K1::~Secp256K1() {
-  for (int i = 0; i < 256; i++) delete[] endomorphism[i];
+Secp256K1::~Secp256K1() {}
+
+Point Secp256K1::AddDirect(Point &p1, Point &p2) {
+  // Wyrównane zmienne dla lepszego dostępu do pamięci
+  alignas(64) Int _s;
+  alignas(64) Int _p;
+  alignas(64) Int dy;
+  alignas(64) Int dx;
+  Point r;
+  r.z.SetInt32(1);
+
+  dy.ModSub(&p2.y, &p1.y);
+  dx.ModSub(&p2.x, &p1.x);
+  dx.ModInv();
+  _s.ModMulK1(&dy, &dx);  // s = (p2.y-p1.y)*inverse(p2.x-p1.x);
+
+  _p.ModSquareK1(&_s);  // _p = pow2(s)
+
+  r.x.ModSub(&_p, &p1.x);
+  r.x.ModSub(&p2.x);  // rx = pow2(s) - p1.x - p2.x;
+
+  r.y.ModSub(&p2.x, &r.x);
+  r.y.ModMulK1(&_s);
+  r.y.ModSub(&p2.y);  // ry = - p2.y - s*(ret.x-p2.x);
+
+  return r;
+}
+
+Point Secp256K1::Add2(Point &p1, Point &p2) {
+  // P2.z = 1
+  // Wyrównane zmienne dla AVX-512
+  alignas(64) Int u;
+  alignas(64) Int v;
+  alignas(64) Int u1;
+  alignas(64) Int v1;
+  alignas(64) Int vs2;
+  alignas(64) Int vs3;
+  alignas(64) Int us2;
+  alignas(64) Int a;
+  alignas(64) Int us2w;
+  alignas(64) Int vs2v2;
+  alignas(64) Int vs3u2;
+  alignas(64) Int _2vs2v2;
+  Point r;
+
+  // Prefetching dla kluczowych danych
+  _mm_prefetch((const char *)&p1, _MM_HINT_T0);
+  _mm_prefetch((const char *)&p2, _MM_HINT_T0);
+
+  u1.ModMulK1(&p2.y, &p1.z);
+  v1.ModMulK1(&p2.x, &p1.z);
+  u.ModSub(&u1, &p1.y);
+  v.ModSub(&v1, &p1.x);
+  us2.ModSquareK1(&u);
+  vs2.ModSquareK1(&v);
+  vs3.ModMulK1(&vs2, &v);
+  us2w.ModMulK1(&us2, &p1.z);
+  vs2v2.ModMulK1(&vs2, &p1.x);
+  _2vs2v2.ModAdd(&vs2v2, &vs2v2);
+  a.ModSub(&us2w, &vs3);
+  a.ModSub(&_2vs2v2);
+
+  r.x.ModMulK1(&v, &a);
+
+  vs3u2.ModMulK1(&vs3, &p1.y);
+  r.y.ModSub(&vs2v2, &a);
+  r.y.ModMulK1(&r.y, &u);
+  r.y.ModSub(&vs3u2);
+
+  r.z.ModMulK1(&vs3, &p1.z);
+
+  return r;
+}
+
+Point Secp256K1::Add(Point &p1, Point &p2) {
+  // Wyrównane zmienne dla AVX-512
+  alignas(64) Int u, v;
+  alignas(64) Int u1, u2;
+  alignas(64) Int v1, v2;
+  alignas(64) Int vs2, vs3;
+  alignas(64) Int us2, w;
+  alignas(64) Int a, us2w;
+  alignas(64) Int vs2v2, vs3u2;
+  alignas(64) Int _2vs2v2, x3;
+  alignas(64) Int vs3y1;
+  Point r;
+
+  // Prefetching
+  _mm_prefetch((const char *)&p1, _MM_HINT_T0);
+  _mm_prefetch((const char *)&p2, _MM_HINT_T0);
+
+  // Calculate intermediate values
+  u1.ModMulK1(&p2.y, &p1.z);
+  u2.ModMulK1(&p1.y, &p2.z);
+  v1.ModMulK1(&p2.x, &p1.z);
+  v2.ModMulK1(&p1.x, &p2.z);
+
+  // Check for a point at infinity
+  if (v1.IsEqual(&v2)) {     // Check if the X coordinates are equal
+    if (!u1.IsEqual(&u2)) {  // If the Y-coordinates are different
+      // Point at infinity
+      r.x.SetInt32(0);
+      r.y.SetInt32(0);
+      r.z.SetInt32(0);
+      return r;
+    } else {
+      // Doubling the point
+      return Double(p1);  // Method for doubling a point
+    }
+  }
+
+  // Basic Dot Addition Calculations
+  u.ModSub(&u1, &u2);
+  v.ModSub(&v1, &v2);
+  w.ModMulK1(&p1.z, &p2.z);
+  us2.ModSquareK1(&u);
+  vs2.ModSquareK1(&v);
+  vs3.ModMulK1(&vs2, &v);
+  us2w.ModMulK1(&us2, &w);
+  vs2v2.ModMulK1(&vs2, &v2);
+  _2vs2v2.ModAdd(&vs2v2, &vs2v2);
+  a.ModSub(&us2w, &vs3);
+  a.ModSub(&_2vs2v2);
+  r.x.ModMulK1(&v, &a);
+  vs3u2.ModMulK1(&vs3, &u2);
+  r.y.ModSub(&vs2v2, &a);
+  r.y.ModMulK1(&r.y, &u);
+  r.y.ModSub(&vs3u2);
+  r.z.ModMulK1(&vs3, &w);
+  return r;
+}
+
+Point Secp256K1::DoubleDirect(Point &p) {
+  // Wyrównane zmienne dla AVX-512
+  alignas(64) Int _s;
+  alignas(64) Int _p;
+  alignas(64) Int a;
+  Point r;
+  r.z.SetInt32(1);
+
+  _s.ModMulK1(&p.x, &p.x);
+  _p.ModAdd(&_s, &_s);
+  _p.ModAdd(&_s);
+
+  a.ModAdd(&p.y, &p.y);
+  a.ModInv();
+  _s.ModMulK1(&_p, &a);  // s = (3*pow2(p.x))*inverse(2*p.y);
+
+  _p.ModMulK1(&_s, &_s);
+  a.ModAdd(&p.x, &p.x);
+  a.ModNeg();
+  r.x.ModAdd(&a, &_p);  // rx = pow2(s) + neg(2*p.x);
+
+  a.ModSub(&r.x, &p.x);
+
+  _p.ModMulK1(&a, &_s);
+  r.y.ModAdd(&_p, &p.y);
+  r.y.ModNeg();  // ry = neg(p.y + s*(ret.x+neg(p.x)));
+
+  return r;
 }
 
 Point Secp256K1::ComputePublicKey(Int *privKey) {
@@ -114,311 +240,136 @@ Point Secp256K1::ComputePublicKey(Int *privKey) {
   uint8_t b;
   Point Q;
   Q.Clear();
-  while (i < 32) {
+
+  // Optymalizacja: prefetching dla tablicy GTable
+  _mm_prefetch((const char *)&GTable[0], _MM_HINT_T0);
+
+  // Search first significant byte
+  for (i = 0; i < 32; i++) {
     b = privKey->GetByte(i);
-    if (i == 31)
-      Q = Add(&Q, &GTable[i * 256 + (b & 0x7F)]);
-    else
-      Q = Add(&Q, &GTable[i * 256 + b]);
-    i++;
+    if (b) break;
   }
+
+  if (i < 32) {
+    Q = GTable[256 * i + (b - 1)];
+    i++;
+
+    // Przetwarzanie pozostałych bajtów z prefetchingiem
+    for (; i < 32; i++) {
+      b = privKey->GetByte(i);
+      if (b) {
+        // Prefetch następnego punktu z GTable
+        if (i < 31) {
+          _mm_prefetch((const char *)&GTable[256 * (i + 1)], _MM_HINT_T0);
+        }
+        Q = Add2(Q, GTable[256 * i + (b - 1)]);
+      }
+    }
+  }
+
+  Q.Reduce();
   return Q;
 }
 
-Point Secp256K1::NextKey(Point &key) {
-  // Input key must be different than G
-  // in order to use NextKey
-  return Add(&key, &G);
+Point Secp256K1::Double(Point &p) {
+  /*
+  if (Y == 0)
+    return POINT_AT_INFINITY
+    W = a * Z ^ 2 + 3 * X ^ 2
+    S = Y * Z
+    B = X * Y*S
+    H = W ^ 2 - 8 * B
+    X' = 2*H*S
+    Y' = W*(4*B - H) - 8*Y^2*S^2
+    Z' = 8*S^3
+    return (X', Y', Z')
+  */
+
+  // Wyrównane zmienne dla AVX-512
+  alignas(64) Int z2;
+  alignas(64) Int x2;
+  alignas(64) Int _3x2;
+  alignas(64) Int w;
+  alignas(64) Int s;
+  alignas(64) Int s2;
+  alignas(64) Int b;
+  alignas(64) Int _8b;
+  alignas(64) Int _8y2s2;
+  alignas(64) Int y2;
+  alignas(64) Int h;
+  Point r;
+
+  // Prefetching
+  _mm_prefetch((const char *)&p, _MM_HINT_T0);
+
+  z2.ModSquareK1(&p.z);
+  z2.SetInt32(0);  // a=0
+  x2.ModSquareK1(&p.x);
+  _3x2.ModAdd(&x2, &x2);
+  _3x2.ModAdd(&x2);
+  w.ModAdd(&z2, &_3x2);
+  s.ModMulK1(&p.y, &p.z);
+  b.ModMulK1(&p.y, &s);
+  b.ModMulK1(&p.x);
+  h.ModSquareK1(&w);
+  _8b.ModAdd(&b, &b);
+  _8b.ModDouble();
+  _8b.ModDouble();
+  h.ModSub(&_8b);
+
+  r.x.ModMulK1(&h, &s);
+  r.x.ModAdd(&r.x);
+
+  s2.ModSquareK1(&s);
+  y2.ModSquareK1(&p.y);
+  _8y2s2.ModMulK1(&y2, &s2);
+  _8y2s2.ModDouble();
+  _8y2s2.ModDouble();
+  _8y2s2.ModDouble();
+
+  r.y.ModAdd(&b, &b);
+  r.y.ModAdd(&r.y, &r.y);
+  r.y.ModSub(&h);
+  r.y.ModMulK1(&w);
+  r.y.ModSub(&_8y2s2);
+
+  r.z.ModMulK1(&s2, &s);
+  r.z.ModDouble();
+  r.z.ModDouble();
+  r.z.ModDouble();
+
+  return r;
 }
 
-void PrintResult(bool ok) {
-  if (ok) {
-    printf("OK\n");
-  } else {
-    printf("ERROR\n");
-  }
-}
+Int Secp256K1::GetY(Int x, bool isEven) {
+  // Wyrównane zmienne dla AVX-512
+  alignas(64) Int _s;
+  alignas(64) Int _p;
 
-bool Secp256K1::CheckPoint(Point &p) {
-  Int _s, _p;
-  Int::SetupField(&order);
-  _s.ModSquare(&p.y);
-  _p.ModMul(&p.x, &p.x);
-  _p.ModMul(&p.x, &_p);
+  _s.ModSquareK1(&x);
+  _p.ModMulK1(&_s, &x);
   _p.ModAdd(7);
-  _p.ModSub(&_s);
-  return _p.IsZero();
+  _p.ModSqrt();
+
+  if (!_p.IsEven() && isEven) {
+    _p.ModNeg();
+  } else if (_p.IsEven() && !isEven) {
+    _p.ModNeg();
+  }
+
+  return _p;
 }
 
-void Secp256K1::GetHash160(int type, bool compressed, Point &pubKey, unsigned char *hash) {
-  unsigned char buffer[128];
-  unsigned char buffer2[32];
-  int hLen = 0;
-  hash[0] = 0;
-  if (type == P2PKH) {
-    hash[0] = 0;
-  } else if (type == P2SH) {
-    hash[0] = 5;
-  }
+bool Secp256K1::EC(Point &p) {
+  // Wyrównane zmienne dla AVX-512
+  alignas(64) Int _s;
+  alignas(64) Int _p;
 
-  // Only P2PKH is currently supported
-  if (type != P2PKH) {
-    memset(hash, 0, 20);
-    return;
-  }
+  _s.ModSquareK1(&p.x);
+  _p.ModMulK1(&_s, &p.x);
+  _p.ModAdd(7);
+  _s.ModMulK1(&p.y, &p.y);
+  _s.ModSub(&_p);
 
-  if (!compressed) {
-    buffer[0] = 4;
-    pubKey.x.Get32Bytes(buffer + 1);
-    pubKey.y.Get32Bytes(buffer + 33);
-    hLen = 65;
-  } else {
-    // Compressed point
-    buffer[0] = pubKey.y.IsEven() ? 2 : 3;
-    pubKey.x.Get32Bytes(buffer + 1);
-    hLen = 33;
-  }
-
-  ripemd160_avx2::getHash160(buffer, hLen, hash + 1);
-}
-
-void Secp256K1::GetHashAddr(int type, bool compressed, Point &pubKey, unsigned char *hash) {
-  unsigned char h[20];
-  GetHash160(type, compressed, pubKey, h);
-}
-
-std::string Secp256K1::GetPrivAddress(bool compressed, Int &privKey) {
-  unsigned char wif[38];
-  unsigned char *buff = wif;
-  int bSize = 0;
-  uint8_t prefix = 0;
-
-  // Network byte
-  *(buff++) = 0x80;
-
-  // Private key bytes
-  privKey.Get32Bytes(buff);
-  buff += 32;
-
-  if (compressed) {
-    // Additional 01 sufix
-    *(buff++) = 1;
-  }
-  bSize = (int)(buff - wif);
-
-  // Base58 encoding (with checksum)
-  return toBase58Check(wif, bSize);
-}
-
-std::string Secp256K1::GetPublicAddress(bool compressed, Point &pubKey) {
-  unsigned char address[25];
-  // Get hash
-  GetHash160(P2PKH, compressed, pubKey, address);
-
-  // Base58 encoding
-  return toBase58Check(address, 21);
-}
-
-// Compute a*G + b*Q using endomorphism
-Point Secp256K1::AddDirect(Point &p1, Point &p2) {
-  Int _s;
-  Int _p;
-  Int dy;
-  Int dx;
-  Point r;
-  r.z.SetInt32(1);
-
-  dy.ModSub(&p2.y, &p1.y);
-  dx.ModSub(&p2.x, &p1.x);
-  dx.ModInv();
-  _s.ModMul(&dy, &dx);
-
-  _p.ModSquare(&_s);
-  _p.ModSub(&p1.x);
-  _p.ModSub(&p2.x);
-  r.x.Set(&_p);
-
-  _p.ModSub(&p1.x, &r.x);
-  _p.ModMul(&_s);
-  r.y.ModSub(&_p, &p1.y);
-
-  return r;
-}
-
-// Compute a*G + b*Q using endomorphism
-Point Secp256K1::ComputePublicKey(Int *a, Int *b, Point &Q) {
-  uint8_t hA[32];
-  uint8_t hB[32];
-  a->Get32Bytes(hA);
-  b->Get32Bytes(hB);
-  Point endBeta;
-  endBeta.x.Set(&Q.x);
-  endBeta.x.ModMul(&beta);
-  endBeta.y.Set(&Q.y);
-
-  Point bQ;
-  bQ.Clear();
-  Point aG;
-  aG.Clear();
-
-  for (int i = 0; i < 32; i++) {
-    for (int j = 0; j < 8; j++) {
-      aG = Double(&aG);
-      bQ = Double(&bQ);
-      if ((hA[i] & 1) != 0) {
-        aG = Add(&aG, &G);
-      }
-      if ((hB[i] & 1) != 0) {
-        bQ = Add(&bQ, &endBeta);
-      }
-      hA[i] >>= 1;
-      hB[i] >>= 1;
-    }
-  }
-  bQ = Add(&bQ, &aG);
-  return bQ;
-}
-
-// -------------------------------------------------------------------------
-
-Point Secp256K1::Double(Point *p) {
-  Int _s;
-  Int _p;
-  Int a;
-  Point r;
-  a.SetInt32(0);
-  r.z.SetInt32(1);
-
-  if (p->IsZero()) return r;
-
-  _s.ModMul(&p->x, &p->x);
-  _s.ModAdd(_s);
-  _s.ModAdd(_s);
-  _s.ModAdd(a);
-  _p.ModAdd(&p->y, &p->y);
-  _p.ModInv();
-  _s.ModMul(&_p);
-
-  _p.ModSquare(&_s);
-  _p.ModSub(&p->x);
-  _p.ModSub(&p->x);
-  r.x.Set(&_p);
-
-  _p.ModSub(&p->x, &r.x);
-  _p.ModMul(&_s);
-  r.y.ModSub(&_p, &p->y);
-
-  return r;
-}
-
-// -------------------------------------------------------------------------
-
-Point Secp256K1::Add(Point *p1, Point *p2) {
-  Int u;
-  Int v;
-  Int u1;
-  Int v1;
-  Int vs2;
-  Int vs3;
-  Int us2;
-  Int a;
-  Int w;
-  Point r;
-  r.z.SetInt32(1);
-
-  if (p1->IsZero()) {
-    r.x.Set(&p2->x);
-    r.y.Set(&p2->y);
-    return r;
-  }
-
-  if (p2->IsZero()) {
-    r.x.Set(&p1->x);
-    r.y.Set(&p1->y);
-    return r;
-  }
-
-  u.ModSub(&p2->y, &p1->y);
-  v.ModSub(&p2->x, &p1->x);
-
-  if (v.IsZero()) {
-    if (u.IsZero()) {
-      return Double(p1);
-    } else {
-      r.z.SetInt32(0);
-      return r;
-    }
-  }
-
-  v.ModInv();
-  u1.ModMul(&u, &v);
-
-  vs2.ModSquare(&v);
-  vs3.ModMul(&vs2, &v);
-  us2.ModSquare(&u);
-  a.ModMul(&vs2, &p1->x);
-  w.ModMul(&vs3, &p1->y);
-
-  r.x.ModSquare(&u1);
-  r.x.ModSub(&vs2);
-  r.x.ModSub(&p1->x);
-  r.x.ModSub(&p2->x);
-
-  r.y.ModSub(&p1->x, &r.x);
-  r.y.ModMul(&u1);
-  r.y.ModSub(&p1->y);
-
-  return r;
-}
-
-std::string Secp256K1::toBase58Check(unsigned char *data, int len) {
-  unsigned char checksum[32];
-  unsigned char hash[32];
-  std::string ret;
-
-  // Compute SHA-256 hash of data
-  sha256_avx2::computeSHA256(data, len, hash);
-
-  // Compute checksum (SHA-256 of SHA-256 hash)
-  sha256_avx2::computeSHA256(hash, 32, checksum);
-
-  // Concatenate data and checksum
-  unsigned char *dataAndChecksum = new unsigned char[len + 4];
-  memcpy(dataAndChecksum, data, len);
-  memcpy(dataAndChecksum + len, checksum, 4);
-
-  // Convert to Base58
-  ret = toBase58(dataAndChecksum, len + 4);
-
-  delete[] dataAndChecksum;
-  return ret;
-}
-
-std::string Secp256K1::toBase58(unsigned char *data, int len) {
-  static const char *base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  std::string result;
-  Int bn58;
-  Int bn;
-  Int r;
-  bn58.SetInt32(58);
-  bn.SetBytes(data, len);
-
-  // Count leading zeros
-  int leadingZeros = 0;
-  for (int i = 0; i < len && data[i] == 0; i++) {
-    leadingZeros++;
-  }
-
-  // Convert to base58 representation
-  while (!bn.IsZero()) {
-    bn.Div(&bn58, &r);
-    result = base58[r.GetInt32()] + result;
-  }
-
-  // Add leading '1's for each leading zero byte
-  for (int i = 0; i < leadingZeros; i++) {
-    result = "1" + result;
-  }
-
-  return result;
+  return _s.IsZero();  // ( ((pow2(y) - (pow3(x) + 7)) % P) == 0 );
 }
