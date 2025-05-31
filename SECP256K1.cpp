@@ -1,5 +1,3 @@
-#include <immintrin.h>  // Dla instrukcji AVX-512
-#include <omp.h>        // Dla OpenMP
 #include <string.h>
 
 #include "SECP256K1.h"
@@ -8,79 +6,44 @@ Secp256K1::Secp256K1() {}
 
 void Secp256K1::Init() {
   // Prime for the finite field
-  alignas(64) Int P;
-  P.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+  Int P;
+  P.SetBase16(
+      "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
 
   // Set up field
   Int::SetupField(&P);
 
   // Generator point and order
-  // Deklaracja zmiennych tymczasowych z wyrównaniem 64 bajtów dla AVX-512
-  alignas(64) Int x_aligned, y_aligned, order_aligned;
-
-  // Inicjalizacja zmiennych tymczasowych
-  x_aligned.SetBase16("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
-  y_aligned.SetBase16("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
-  order_aligned.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
-
-  // Prefetching dla lepszej wydajności pamięci
-  _mm_prefetch((const char *)&x_aligned, _MM_HINT_T0);
-  _mm_prefetch((const char *)&y_aligned, _MM_HINT_T0);
-
-  // Przypisanie do właściwych zmiennych
-  G.x = x_aligned;
-  G.y = y_aligned;
+  G.x.SetBase16(
+      "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
+  G.y.SetBase16(
+      "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
   G.z.SetInt32(1);
-  order = order_aligned;
+  order.SetBase16(
+      "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
   Int::InitK1(&order);
 
-  // Compute Generator table - wykorzystanie OpenMP dla równoległego przetwarzania
+  // Compute Generator table
   Point N(G);
-  GTable[0] = N;
-
-#pragma omp parallel
-  {
-#pragma omp single
-    {
-      for (int i = 0; i < 32; i++) {
-#pragma omp task firstprivate(i)
-        {
-          Point localN;
-          if (i == 0) {
-            localN = N;
-          } else {
-            localN = GTable[i * 256];
-            localN = DoubleDirect(localN);
-          }
-
-          GTable[i * 256] = localN;
-
-          // Prefetch dla następnych iteracji
-          if (i < 31) {
-            _mm_prefetch((const char *)&GTable[(i + 1) * 256], _MM_HINT_T0);
-          }
-
-          for (int j = 1; j < 255; j++) {
-            Point add = AddDirect(localN, GTable[i * 256]);
-            GTable[i * 256 + j] = add;
-            localN = add;
-          }
-          GTable[i * 256 + 255] = localN;  // Dummy point for check function
-        }
-      }
+  for (int i = 0; i < 32; i++) {
+    GTable[i * 256] = N;
+    N = DoubleDirect(N);
+    for (int j = 1; j < 255; j++) {
+      GTable[i * 256 + j] = N;
+      N = AddDirect(N, GTable[i * 256]);
     }
+    GTable[i * 256 + 255] = N;  // Dummy point for check function
   }
 }
 
 Secp256K1::~Secp256K1() {}
 
 Point Secp256K1::AddDirect(Point &p1, Point &p2) {
-  // Wyrównane zmienne dla lepszego dostępu do pamięci
-  alignas(64) Int _s;
-  alignas(64) Int _p;
-  alignas(64) Int dy;
-  alignas(64) Int dx;
+  Int _s;
+  Int _p;
+  Int dy;
+  Int dx;
   Point r;
   r.z.SetInt32(1);
 
@@ -103,24 +66,20 @@ Point Secp256K1::AddDirect(Point &p1, Point &p2) {
 
 Point Secp256K1::Add2(Point &p1, Point &p2) {
   // P2.z = 1
-  // Wyrównane zmienne dla AVX-512
-  alignas(64) Int u;
-  alignas(64) Int v;
-  alignas(64) Int u1;
-  alignas(64) Int v1;
-  alignas(64) Int vs2;
-  alignas(64) Int vs3;
-  alignas(64) Int us2;
-  alignas(64) Int a;
-  alignas(64) Int us2w;
-  alignas(64) Int vs2v2;
-  alignas(64) Int vs3u2;
-  alignas(64) Int _2vs2v2;
-  Point r;
 
-  // Prefetching dla kluczowych danych
-  _mm_prefetch((const char *)&p1, _MM_HINT_T0);
-  _mm_prefetch((const char *)&p2, _MM_HINT_T0);
+  Int u;
+  Int v;
+  Int u1;
+  Int v1;
+  Int vs2;
+  Int vs3;
+  Int us2;
+  Int a;
+  Int us2w;
+  Int vs2v2;
+  Int vs3u2;
+  Int _2vs2v2;
+  Point r;
 
   u1.ModMulK1(&p2.y, &p1.z);
   v1.ModMulK1(&p2.x, &p1.z);
@@ -148,21 +107,16 @@ Point Secp256K1::Add2(Point &p1, Point &p2) {
 }
 
 Point Secp256K1::Add(Point &p1, Point &p2) {
-  // Wyrównane zmienne dla AVX-512
-  alignas(64) Int u, v;
-  alignas(64) Int u1, u2;
-  alignas(64) Int v1, v2;
-  alignas(64) Int vs2, vs3;
-  alignas(64) Int us2, w;
-  alignas(64) Int a, us2w;
-  alignas(64) Int vs2v2, vs3u2;
-  alignas(64) Int _2vs2v2, x3;
-  alignas(64) Int vs3y1;
+  Int u, v;
+  Int u1, u2;
+  Int v1, v2;
+  Int vs2, vs3;
+  Int us2, w;
+  Int a, us2w;
+  Int vs2v2, vs3u2;
+  Int _2vs2v2, x3;
+  Int vs3y1;
   Point r;
-
-  // Prefetching
-  _mm_prefetch((const char *)&p1, _MM_HINT_T0);
-  _mm_prefetch((const char *)&p2, _MM_HINT_T0);
 
   // Calculate intermediate values
   u1.ModMulK1(&p2.y, &p1.z);
@@ -206,10 +160,9 @@ Point Secp256K1::Add(Point &p1, Point &p2) {
 }
 
 Point Secp256K1::DoubleDirect(Point &p) {
-  // Wyrównane zmienne dla AVX-512
-  alignas(64) Int _s;
-  alignas(64) Int _p;
-  alignas(64) Int a;
+  Int _s;
+  Int _p;
+  Int a;
   Point r;
   r.z.SetInt32(1);
 
@@ -241,30 +194,17 @@ Point Secp256K1::ComputePublicKey(Int *privKey) {
   Point Q;
   Q.Clear();
 
-  // Optymalizacja: prefetching dla tablicy GTable
-  _mm_prefetch((const char *)&GTable[0], _MM_HINT_T0);
-
   // Search first significant byte
   for (i = 0; i < 32; i++) {
     b = privKey->GetByte(i);
     if (b) break;
   }
+  Q = GTable[256 * i + (b - 1)];
+  i++;
 
-  if (i < 32) {
-    Q = GTable[256 * i + (b - 1)];
-    i++;
-
-    // Przetwarzanie pozostałych bajtów z prefetchingiem
-    for (; i < 32; i++) {
-      b = privKey->GetByte(i);
-      if (b) {
-        // Prefetch następnego punktu z GTable
-        if (i < 31) {
-          _mm_prefetch((const char *)&GTable[256 * (i + 1)], _MM_HINT_T0);
-        }
-        Q = Add2(Q, GTable[256 * i + (b - 1)]);
-      }
-    }
+  for (; i < 32; i++) {
+    b = privKey->GetByte(i);
+    if (b) Q = Add2(Q, GTable[256 * i + (b - 1)]);
   }
 
   Q.Reduce();
@@ -285,22 +225,18 @@ Point Secp256K1::Double(Point &p) {
     return (X', Y', Z')
   */
 
-  // Wyrównane zmienne dla AVX-512
-  alignas(64) Int z2;
-  alignas(64) Int x2;
-  alignas(64) Int _3x2;
-  alignas(64) Int w;
-  alignas(64) Int s;
-  alignas(64) Int s2;
-  alignas(64) Int b;
-  alignas(64) Int _8b;
-  alignas(64) Int _8y2s2;
-  alignas(64) Int y2;
-  alignas(64) Int h;
+  Int z2;
+  Int x2;
+  Int _3x2;
+  Int w;
+  Int s;
+  Int s2;
+  Int b;
+  Int _8b;
+  Int _8y2s2;
+  Int y2;
+  Int h;
   Point r;
-
-  // Prefetching
-  _mm_prefetch((const char *)&p, _MM_HINT_T0);
 
   z2.ModSquareK1(&p.z);
   z2.SetInt32(0);  // a=0
@@ -342,9 +278,8 @@ Point Secp256K1::Double(Point &p) {
 }
 
 Int Secp256K1::GetY(Int x, bool isEven) {
-  // Wyrównane zmienne dla AVX-512
-  alignas(64) Int _s;
-  alignas(64) Int _p;
+  Int _s;
+  Int _p;
 
   _s.ModSquareK1(&x);
   _p.ModMulK1(&_s, &x);
@@ -361,9 +296,8 @@ Int Secp256K1::GetY(Int x, bool isEven) {
 }
 
 bool Secp256K1::EC(Point &p) {
-  // Wyrównane zmienne dla AVX-512
-  alignas(64) Int _s;
-  alignas(64) Int _p;
+  Int _s;
+  Int _p;
 
   _s.ModSquareK1(&p.x);
   _p.ModMulK1(&_s, &p.x);
