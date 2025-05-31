@@ -397,7 +397,7 @@ static void computeHash160BatchBinSingle(int numKeys, uint8_t pubKeys[][33],
 
 // Process batches
 #pragma omp parallel for
-  for (__uint128_t batch = 0; batch < totalBatches; batch++) {
+  for (uint64_t batch = 0; batch < totalBatches; batch++) {
     const __uint128_t batchCount =
         std::min<__uint128_t>(HASH_BATCH_SIZE, numKeys - batch * HASH_BATCH_SIZE);
 
