@@ -1244,32 +1244,3 @@ void Int::ModMulK1order(Int *a) {
     Set(&t);
 }
 
-// Batch operations optimized for AVX-512
-void Int::BatchModAdd(Int *a, Int *b, Int *results, int count) {
-#pragma omp parallel for
-  for (int i = 0; i < count; i++) {
-    results[i].ModAdd(&a[i], &b[i]);
-  }
-}
-
-void Int::BatchModSub(Int *a, Int *b, Int *results, int count) {
-#pragma omp parallel for
-  for (int i = 0; i < count; i++) {
-    results[i].ModSub(&a[i], &b[i]);
-  }
-}
-
-void Int::BatchModMul(Int *a, Int *b, Int *results, int count) {
-#pragma omp parallel for
-  for (int i = 0; i < count; i++) {
-    results[i].ModMul(&a[i], &b[i]);
-  }
-}
-
-void Int::BatchModInv(Int *a, Int *results, int count) {
-#pragma omp parallel for
-  for (int i = 0; i < count; i++) {
-    results[i].Set(&a[i]);
-    results[i].ModInv();
-  }
-}
