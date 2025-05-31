@@ -1,15 +1,14 @@
 #include <immintrin.h>
 #include <stdint.h>
 #include <string.h>
+#include <x86intrin.h>
 
 #include "sha256_avx512.h"
 
 namespace _sha256avx512 {
 
-// 64-byte alignment for optimal AVX-512 performance on Sapphire Rapids
 #define ALIGN64 __attribute__((aligned(64)))
 
-// SHA-256 constants
 static const ALIGN64 uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
     0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -23,8 +22,6 @@ static const ALIGN64 uint32_t K[64] = {
     0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
-// Initialize SHA-256 state with initial hash values for 16-way parallel
-// processing
 inline void Initialize(__m512i* s) {
   s[0] = _mm512_set1_epi32(0x6a09e667);
   s[1] = _mm512_set1_epi32(0xbb67ae85);
@@ -36,7 +33,7 @@ inline void Initialize(__m512i* s) {
   s[7] = _mm512_set1_epi32(0x5be0cd19);
 }
 
-// AVX-512 rotation and shift operations
+// AVX-512 SHA-256 rotation and shift operations
 #define ROR512(x, n) \
   _mm512_or_si512(_mm512_srli_epi32(x, n), _mm512_slli_epi32(x, 32 - (n)))
 #define SHR512(x, n) _mm512_srli_epi32(x, n)
@@ -371,9 +368,23 @@ inline void Transform(__m512i* state, const uint8_t* data[16]) {
   state[7] = _mm512_add_epi32(state[7], h);
 }
 
+inline void ExtractHashes(__m512i* state, unsigned char* hashArray[16]) {
+  ALIGN64 uint32_t digest[8][16];
+
+  for (int i = 0; i < 8; ++i) {
+    _mm512_store_si512((__m512i*)digest[i], state[i]);
+  }
+
+  for (int i = 0; i < 16; ++i) {
+    for (int j = 0; j < 8; ++j) {
+      uint32_t word = __builtin_bswap32(digest[j][i]);
+      *((uint32_t*)(hashArray[i] + j * 4)) = word;
+    }
+  }
+}
+
 }  // namespace _sha256avx512
 
-// Main function - 16-way parallel SHA-256 computation
 void sha256avx512_16B(
     const uint8_t* data0, const uint8_t* data1, const uint8_t* data2,
     const uint8_t* data3, const uint8_t* data4, const uint8_t* data5,
@@ -394,24 +405,7 @@ void sha256avx512_16B(
                                   hash6,  hash7,  hash8,  hash9, hash10, hash11,
                                   hash12, hash13, hash14, hash15};
 
-  // Initialize SHA-256 state
   _sha256avx512::Initialize(state);
-
-  // Perform transformation
   _sha256avx512::Transform(state, data);
-
-  // Extract results from state and convert to proper byte order
-  ALIGN64 uint32_t digest[8][16];
-
-  for (int i = 0; i < 8; ++i) {
-    _mm512_store_si512((__m512i*)digest[i], state[i]);
-  }
-
-  // Convert to big-endian and store final hash results
-  for (int i = 0; i < 16; ++i) {
-    for (int j = 0; j < 8; ++j) {
-      uint32_t word = __builtin_bswap32(digest[j][i]);
-      memcpy(hashArray[i] + j * 4, &word, 4);
-    }
-  }
+  _sha256avx512::ExtractHashes(state, hashArray);
 }
