@@ -1244,7 +1244,7 @@ void Int::ModMulK1order(Int *a) {
     Set(&t);
 }
 
-// AVX-512 batch operations - będą dodane do Int.h na późniejszym etapie
+// Batch operations optimized for AVX-512
 void Int::BatchModAdd(Int *a, Int *b, Int *results, int count) {
 #pragma omp parallel for
   for (int i = 0; i < count; i++) {
