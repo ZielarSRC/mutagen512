@@ -52,9 +52,91 @@ static const int ss[80] = {8,  9,  9,  11, 13, 15, 15, 5,  7,  7,  8,  11, 14, 1
                            15, 5,  8,  11, 14, 14, 6,  14, 6,  9,  12, 9,  12, 5,  15, 8,
                            8,  5,  12, 9,  12, 5,  14, 6,  8,  13, 6,  5,  15, 13, 11, 11};
 
-// Optimized version for AVX-512
-// Zmieniono #pragma unroll(16) na format kompatybilny z Intel
-#pragma unroll
+// Poprawione makro DEPACK_AVX512
+#define DEPACK_AVX512(d, i)         \
+  {                                 \
+    alignas(64) uint32_t temp[16];  \
+    _mm512_store_epi32(temp, s[0]); \
+    ((uint32_t*)d)[0] = temp[i];    \
+  }
+
+// Wcześniejsza deklaracja funkcji, żeby była widoczna przy wywołaniu
+static void compress_block_avx512(__m512i* state, const __m512i* chunk);
+
+// Main function to compute RIPEMD-160 for 16 input blocks simultaneously
+void ripemd160avx512_16(unsigned char* in0, unsigned char* in1, unsigned char* in2,
+                        unsigned char* in3, unsigned char* in4, unsigned char* in5,
+                        unsigned char* in6, unsigned char* in7, unsigned char* in8,
+                        unsigned char* in9, unsigned char* in10, unsigned char* in11,
+                        unsigned char* in12, unsigned char* in13, unsigned char* in14,
+                        unsigned char* in15, unsigned char* out0, unsigned char* out1,
+                        unsigned char* out2, unsigned char* out3, unsigned char* out4,
+                        unsigned char* out5, unsigned char* out6, unsigned char* out7,
+                        unsigned char* out8, unsigned char* out9, unsigned char* out10,
+                        unsigned char* out11, unsigned char* out12, unsigned char* out13,
+                        unsigned char* out14, unsigned char* out15) {
+  // Initial hash values
+  __m512i state[5];
+  state[0] = _mm512_set1_epi32(0x67452301);
+  state[1] = _mm512_set1_epi32(0xEFCDAB89);
+  state[2] = _mm512_set1_epi32(0x98BADCFE);
+  state[3] = _mm512_set1_epi32(0x10325476);
+  state[4] = _mm512_set1_epi32(0xC3D2E1F0);
+
+  // Prepare message blocks (16 inputs × 64 bytes each)
+  __m512i chunk[16];
+  unsigned char* inputs[16] = {in0, in1, in2,  in3,  in4,  in5,  in6,  in7,
+                               in8, in9, in10, in11, in12, in13, in14, in15};
+
+  // Process each 64-byte chunk
+  for (int i = 0; i < 16; i++) {
+    for (int j = 0; j < 16; j++) {
+      uint32_t values[16];
+      for (int k = 0; k < 16; k++) {
+        values[k] = ((uint32_t)inputs[k][i * 4 + 0]) | ((uint32_t)inputs[k][i * 4 + 1] << 8) |
+                    ((uint32_t)inputs[k][i * 4 + 2] << 16) | ((uint32_t)inputs[k][i * 4 + 3] << 24);
+      }
+      chunk[i] = _mm512_loadu_si512((__m512i*)values);
+    }
+    compress_block_avx512(state, chunk);
+  }
+
+  // Extract results
+  __m512i s[1];
+  unsigned char* outputs[16] = {out0, out1, out2,  out3,  out4,  out5,  out6,  out7,
+                                out8, out9, out10, out11, out12, out13, out14, out15};
+
+  for (int i = 0; i < 5; i++) {
+    s[0] = state[i];
+    for (int j = 0; j < 16; j++) {
+      DEPACK_AVX512(outputs[j] + i * 4, j);
+    }
+  }
+}
+
+// Version for 64 inputs simultaneously using 4 × 16 blocks
+void ripemd160avx512_64(unsigned char* in0, unsigned char* in1, unsigned char* in2,
+                        unsigned char* in3, unsigned char* in4, unsigned char* in5,
+                        unsigned char* in6, unsigned char* in7, unsigned char* in8,
+                        unsigned char* in9, unsigned char* in10, unsigned char* in11,
+                        unsigned char* in12, unsigned char* in13, unsigned char* in14,
+                        unsigned char* in15, unsigned char* out0, unsigned char* out1,
+                        unsigned char* out2, unsigned char* out3, unsigned char* out4,
+                        unsigned char* out5, unsigned char* out6, unsigned char* out7,
+                        unsigned char* out8, unsigned char* out9, unsigned char* out10,
+                        unsigned char* out11, unsigned char* out12, unsigned char* out13,
+                        unsigned char* out14, unsigned char* out15) {
+#pragma omp parallel sections
+  {
+#pragma omp section
+    ripemd160avx512_16(in0, in1, in2, in3, in4, in5, in6, in7, in8, in9, in10, in11, in12, in13,
+                       in14, in15, out0, out1, out2, out3, out4, out5, out6, out7, out8, out9,
+                       out10, out11, out12, out13, out14, out15);
+  }
+}
+
+// Implementacja funkcji compress_block_avx512 po jej deklaracji
+// Usunięto problematyczny #pragma unroll(16)
 static void compress_block_avx512(__m512i* state, const __m512i* chunk) {
   __m512i a = state[0];
   __m512i b = state[1];
@@ -176,86 +258,6 @@ static void compress_block_avx512(__m512i* state, const __m512i* chunk) {
   state[3] = _mm512_add_epi32(state[4], _mm512_add_epi32(a, bb));
   state[4] = _mm512_add_epi32(state[0], _mm512_add_epi32(b, cc));
   state[0] = t;
-}
-
-// Poprawione makro DEPACK_AVX512
-#define DEPACK_AVX512(d, i)         \
-  {                                 \
-    alignas(64) uint32_t temp[16];  \
-    _mm512_store_epi32(temp, s[0]); \
-    ((uint32_t*)d)[0] = temp[i];    \
-  }
-
-// Main function to compute RIPEMD-160 for 16 input blocks simultaneously
-void ripemd160avx512_16(unsigned char* in0, unsigned char* in1, unsigned char* in2,
-                        unsigned char* in3, unsigned char* in4, unsigned char* in5,
-                        unsigned char* in6, unsigned char* in7, unsigned char* in8,
-                        unsigned char* in9, unsigned char* in10, unsigned char* in11,
-                        unsigned char* in12, unsigned char* in13, unsigned char* in14,
-                        unsigned char* in15, unsigned char* out0, unsigned char* out1,
-                        unsigned char* out2, unsigned char* out3, unsigned char* out4,
-                        unsigned char* out5, unsigned char* out6, unsigned char* out7,
-                        unsigned char* out8, unsigned char* out9, unsigned char* out10,
-                        unsigned char* out11, unsigned char* out12, unsigned char* out13,
-                        unsigned char* out14, unsigned char* out15) {
-  // Initial hash values
-  __m512i state[5];
-  state[0] = _mm512_set1_epi32(0x67452301);
-  state[1] = _mm512_set1_epi32(0xEFCDAB89);
-  state[2] = _mm512_set1_epi32(0x98BADCFE);
-  state[3] = _mm512_set1_epi32(0x10325476);
-  state[4] = _mm512_set1_epi32(0xC3D2E1F0);
-
-  // Prepare message blocks (16 inputs × 64 bytes each)
-  __m512i chunk[16];
-  unsigned char* inputs[16] = {in0, in1, in2,  in3,  in4,  in5,  in6,  in7,
-                               in8, in9, in10, in11, in12, in13, in14, in15};
-
-  // Process each 64-byte chunk
-  for (int i = 0; i < 16; i++) {
-    for (int j = 0; j < 16; j++) {
-      uint32_t values[16];
-      for (int k = 0; k < 16; k++) {
-        values[k] = ((uint32_t)inputs[k][i * 4 + 0]) | ((uint32_t)inputs[k][i * 4 + 1] << 8) |
-                    ((uint32_t)inputs[k][i * 4 + 2] << 16) | ((uint32_t)inputs[k][i * 4 + 3] << 24);
-      }
-      chunk[i] = _mm512_loadu_si512((__m512i*)values);
-    }
-    compress_block_avx512(state, chunk);
-  }
-
-  // Extract results
-  __m512i s[1];
-  unsigned char* outputs[16] = {out0, out1, out2,  out3,  out4,  out5,  out6,  out7,
-                                out8, out9, out10, out11, out12, out13, out14, out15};
-
-  for (int i = 0; i < 5; i++) {
-    s[0] = state[i];
-    for (int j = 0; j < 16; j++) {
-      DEPACK_AVX512(outputs[j] + i * 4, j);
-    }
-  }
-}
-
-// Version for 64 inputs simultaneously using 4 × 16 blocks
-void ripemd160avx512_64(unsigned char* in0, unsigned char* in1, unsigned char* in2,
-                        unsigned char* in3, unsigned char* in4, unsigned char* in5,
-                        unsigned char* in6, unsigned char* in7, unsigned char* in8,
-                        unsigned char* in9, unsigned char* in10, unsigned char* in11,
-                        unsigned char* in12, unsigned char* in13, unsigned char* in14,
-                        unsigned char* in15, unsigned char* out0, unsigned char* out1,
-                        unsigned char* out2, unsigned char* out3, unsigned char* out4,
-                        unsigned char* out5, unsigned char* out6, unsigned char* out7,
-                        unsigned char* out8, unsigned char* out9, unsigned char* out10,
-                        unsigned char* out11, unsigned char* out12, unsigned char* out13,
-                        unsigned char* out14, unsigned char* out15) {
-#pragma omp parallel sections
-  {
-#pragma omp section
-    ripemd160avx512_16(in0, in1, in2, in3, in4, in5, in6, in7, in8, in9, in10, in11, in12, in13,
-                       in14, in15, out0, out1, out2, out3, out4, out5, out6, out7, out8, out9,
-                       out10, out11, out12, out13, out14, out15);
-  }
 }
 
 }  // namespace ripemd160avx512
