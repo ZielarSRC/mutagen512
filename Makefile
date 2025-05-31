@@ -16,7 +16,7 @@ ifdef INTEL_CXX
     CXX = icpx
     $(info Using Intel oneAPI compiler for optimal Xeon 8488C performance)
     # Intel compiler flags optimized for Xeon Platinum
-    CXXFLAGS = -std=c++17 -O3 -xHOST -qopt-zmm-usage=high -march=icelake-server \
+    CXXFLAGS = -std=c++17 -O3 -xHOST -qopt-zmm-usage=high -march=sapphirerapids \
                -fiopenmp -qopenmp-simd -qopt-report=5 -qopt-report-phase=vec \
                -qopt-prefetch=5 -qoverride-limits -Wall -Wextra -Wno-deprecated-declarations \
                -Wno-unknown-pragmas -ipo -inline-forceinline -finline-functions \
@@ -25,7 +25,7 @@ else
     CXX = g++
     $(info Using GCC with AVX-512 optimizations for Xeon 8488C)
     # GCC flags optimized for Xeon Platinum with AVX-512
-    CXXFLAGS = -m64 -std=c++17 -Ofast -march=icelake-server -mtune=icelake-server \
+    CXXFLAGS = -m64 -std=c++17 -Ofast -march=sapphirerapids -mtune=sapphirerapids \
                -Wall -Wextra -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
                -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
                -funroll-loops -ftree-vectorize -fstrict-aliasing -fno-semantic-interposition \
@@ -72,7 +72,7 @@ ifdef INTEL_CXX
     CXX = icpx
     $(info Using Intel oneAPI compiler for optimal Xeon 8488C performance)
     # Intel compiler flags for Windows
-    CXXFLAGS = -std=c++17 -O3 -xHOST -qopt-zmm-usage=high -march=icelake-server \
+    CXXFLAGS = -std=c++17 -O3 -xHOST -qopt-zmm-usage=high -march=sapphirerapids \
                -Qopenmp -Qopenmp-simd -Qopt-report:5 -Qopt-report-phase:vec \
                -Qopt-prefetch:5 -Qoverride-limits -Wall -Wextra -ipo -Qinline-forceinline \
                -Qfnalign:32 -Qunroll-aggressive -Qipo -DNDEBUG
@@ -93,7 +93,7 @@ else
         CXX = g++
         $(info Using MinGW-w64 with AVX-512 optimizations)
         # MinGW flags for AVX-512
-        CXXFLAGS = -m64 -std=c++17 -Ofast -march=icelake-server -mtune=icelake-server \
+        CXXFLAGS = -m64 -std=c++17 -Ofast -march=sapphirerapids -mtune=sapphirerapids \
                    -Wall -Wextra -Wno-write-strings -Wno-unused-variable -Wno-deprecated-copy \
                    -Wno-unused-parameter -Wno-sign-compare -Wno-strict-aliasing \
                    -funroll-loops -ftree-vectorize -fstrict-aliasing -fno-semantic-interposition \
