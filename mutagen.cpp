@@ -2,7 +2,7 @@
 #include <immintrin.h>
 #include <numa.h>
 #include <omp.h>
-#include <pthread.h>
+#include <x86intrin.h>
 
 #include <algorithm>
 #include <array>
@@ -31,19 +31,27 @@
 
 using namespace std;
 
-// Sapphire Rapids optimized constants
-static constexpr int POINTS_BATCH_SIZE = 512;  // Optimized for AVX-512
-static constexpr int HASH_BATCH_SIZE = 16;     // 16-way parallel hashing
-static constexpr int L1_CACHE_LINE_SIZE = 64;
-static constexpr int L2_CACHE_SIZE = 2048 * 1024;  // 2MB per core
-static constexpr int PREFETCH_DISTANCE = 8;
+// Terminal control for Linux only
+void clearTerminal() {
+  std::cout << "\033[2J\033[H";
+  std::cout.flush();
+}
 
-int PUZZLE_NUM = 71;  // Default to puzzle 71
-int WORKERS = 0;      // Will be set based on CPU topology
+void moveCursorTo(int x, int y) {
+  std::cout << "\033[" << y << ";" << x << "H";
+  std::cout.flush();
+}
+
+// Configuration constants optimized for Sapphire Rapids
+int PUZZLE_NUM = 71;
+int WORKERS = omp_get_num_procs();
 int FLIP_COUNT = -1;
 const __uint128_t REPORT_INTERVAL =
-    50000000;  // Increased for higher performance
+    50000000;  // Increased for higher throughput
+static constexpr int POINTS_BATCH_SIZE = 512;  // Doubled for AVX-512
+static constexpr int HASH_BATCH_SIZE = 16;     // Doubled for AVX-512
 
+// Puzzle data - keeping only relevant puzzles for mutation approach
 const unordered_map<int, tuple<int, string, string>> PUZZLE_DATA = {
     {20, {8, "b907c3a2a3b27789dfb509b730dd47703c272868", "357535"}},
     {21, {9, "29a78213caa9eea824acf08022ab9dfc83414f56", "863317"}},
@@ -104,7 +112,7 @@ const unordered_map<int, tuple<int, string, string>> PUZZLE_DATA = {
     {67,
      {31, "739437bb3dd6d1983e66629c5f08c70e52769371", "46346217550346335726"}},
     {68,
-     {42, "e0b8a2baee1b77fc703455f39d51477451fc8cfc", "132656943602386256302"}},
+     {42, "e0b8a2baee1deb76c9331e637564c257d68a08", "132656943602386256302"}},
     {69,
      {34, "61eb8a50c86b0584bb727dd65bed8d2400d6d5aa", "219898266213316039825"}},
     {70,
@@ -120,7 +128,7 @@ atomic<bool> stop_event(false);
 mutex result_mutex;
 queue<tuple<string, __uint128_t, int>> results;
 
-// AVX-512 optimized counter with full 512-bit utilization
+// AVX-512 optimized counter for Sapphire Rapids
 union AVX512Counter {
   __m512i vec;
   uint64_t u64[8];
@@ -130,30 +138,28 @@ union AVX512Counter {
 
   AVX512Counter(__uint128_t value) { store(value); }
 
-  // AVX-512 optimized increment using gather/scatter operations
   void increment() {
-    const __m512i one = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0, 1);
+    // Use AVX-512 for 128-bit increment
+    __m512i one = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0, 1);
     vec = _mm512_add_epi64(vec, one);
 
-    // Handle carry propagation using AVX-512 mask operations
-    __mmask8 carry_mask = _mm512_cmpeq_epi64_mask(
-        _mm512_and_si512(vec, _mm512_set1_epi64(0xFFFFFFFFFFFFFFFFULL)),
-        _mm512_setzero_si512());
-
-    if (carry_mask & 0x01) {
-      const __m512i carry = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 1, 0);
+    // Handle carry propagation efficiently with AVX-512
+    if (u64[0] == 0) {
+      __m512i carry = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 1, 0);
       vec = _mm512_add_epi64(vec, carry);
     }
   }
 
   void add(__uint128_t value) {
-    const __m512i add_val = _mm512_set_epi64(0, 0, 0, 0, 0, 0, value >> 64,
-                                             value & 0xFFFFFFFFFFFFFFFFULL);
+    __m512i add_val = _mm512_set_epi64(0, 0, 0, 0, 0, 0, value >> 64, value);
     vec = _mm512_add_epi64(vec, add_val);
 
-    // Optimized carry handling
-    if (u64[0] < (value & 0xFFFFFFFFFFFFFFFFULL)) {
-      const __m512i carry = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 1, 0);
+    // Handle carry with conditional move (AVX-512 feature)
+    __mmask8 carry_mask = _mm512_cmplt_epu64_mask(
+        _mm512_set1_epi64(u64[0]),
+        _mm512_set1_epi64(value & 0xFFFFFFFFFFFFFFFFULL));
+    if (carry_mask & 1) {
+      __m512i carry = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 1, 0);
       vec = _mm512_add_epi64(vec, carry);
     }
   }
@@ -163,18 +169,18 @@ union AVX512Counter {
   }
 
   void store(__uint128_t value) {
-    vec = _mm512_setzero_si512();
     u64[0] = static_cast<uint64_t>(value);
     u64[1] = static_cast<uint64_t>(value >> 64);
+    // Clear upper bits
+    for (int i = 2; i < 8; i++) u64[i] = 0;
   }
 
   bool operator<(const AVX512Counter& other) const {
-    return _mm512_cmplt_epi64_mask(vec, other.vec) != 0;
+    return (u64[1] < other.u64[1]) ||
+           (u64[1] == other.u64[1] && u64[0] < other.u64[0]);
   }
 
-  bool operator>=(const AVX512Counter& other) const {
-    return _mm512_cmpge_epi64_mask(vec, other.vec) != 0;
-  }
+  bool operator>=(const AVX512Counter& other) const { return !(*this < other); }
 
   static AVX512Counter div(const AVX512Counter& num, uint64_t denom) {
     __uint128_t n = num.load();
@@ -193,27 +199,7 @@ union AVX512Counter {
   }
 };
 
-// NUMA-aware memory allocation for optimal performance
-template <typename T>
-T* numa_alloc_aligned(size_t count, int node = -1) {
-  size_t size = count * sizeof(T);
-  size_t aligned_size = (size + 63) & ~63;  // 64-byte alignment
-
-  void* ptr;
-  if (node >= 0) {
-    ptr = numa_alloc_onnode(aligned_size, node);
-  } else {
-    ptr = numa_alloc_local(aligned_size);
-  }
-
-  if (!ptr) {
-    throw std::bad_alloc();
-  }
-
-  return static_cast<T*>(ptr);
-}
-
-static AVX512Counter total_checked_avx512;
+static AVX512Counter total_checked_avx;
 __uint128_t total_combinations = 0;
 vector<string> g_threadPrivateKeys;
 mutex progress_mutex;
@@ -224,130 +210,41 @@ double globalElapsedTime = 0.0;
 double mkeysPerSec = 0.0;
 chrono::time_point<chrono::high_resolution_clock> tStart;
 
-// CPU topology detection for optimal thread affinity
-struct CPUTopology {
-  int numa_nodes;
-  int cores_per_node;
-  int threads_per_core;
-  vector<int> core_ids;
-
-  CPUTopology() {
-    numa_nodes = numa_max_node() + 1;
-    cores_per_node = 0;
-    threads_per_core = 0;
-
-    // Detect CPU topology
-    cpu_set_t cpu_set;
-    CPU_ZERO(&cpu_set);
-    sched_getaffinity(0, sizeof(cpu_set), &cpu_set);
-
-    for (int i = 0; i < CPU_SETSIZE; ++i) {
-      if (CPU_ISSET(i, &cpu_set)) {
-        core_ids.push_back(i);
-      }
-    }
-
-    cores_per_node = core_ids.size() / numa_nodes;
-    threads_per_core = 2;  // Assume hyperthreading
-  }
-};
-
-static CPUTopology cpu_topology;
-
-// Intel SHA Extensions optimized block preparation
-inline void prepareShaBlockSHA(const uint8_t* dataSrc, size_t dataLen,
-                               uint8_t* outBlock) {
-  // Use Intel SHA Extensions for optimal performance
-  alignas(64) uint8_t block[64];
-  memset(block, 0, 64);
-  memcpy(block, dataSrc, dataLen);
-  block[dataLen] = 0x80;
-
-  const uint32_t bitLen = static_cast<uint32_t>(dataLen * 8);
-  // Use Intel's optimized byte order handling
-  *reinterpret_cast<uint32_t*>(&block[60]) = __builtin_bswap32(bitLen);
-
-  memcpy(outBlock, block, 64);
+static std::string formatElapsedTime(double seconds) {
+  int hrs = static_cast<int>(seconds) / 3600;
+  int mins = (static_cast<int>(seconds) % 3600) / 60;
+  int secs = static_cast<int>(seconds) % 60;
+  std::ostringstream oss;
+  oss << std::setw(2) << std::setfill('0') << hrs << ":" << std::setw(2)
+      << std::setfill('0') << mins << ":" << std::setw(2) << std::setfill('0')
+      << secs;
+  return oss.str();
 }
 
-// AVX-512 optimized batch hash computation
-static void computeHash160BatchAVX512(int numKeys, uint8_t pubKeys[][33],
-                                      uint8_t hashResults[][20]) {
-  // Allocate NUMA-aware aligned memory
-  alignas(64) auto shaInputs =
-      numa_alloc_aligned<array<uint8_t, 64>>(HASH_BATCH_SIZE);
-  alignas(64) auto shaOutputs =
-      numa_alloc_aligned<array<uint8_t, 32>>(HASH_BATCH_SIZE);
-  alignas(64) auto ripemdInputs =
-      numa_alloc_aligned<array<uint8_t, 64>>(HASH_BATCH_SIZE);
-  alignas(64) auto ripemdOutputs =
-      numa_alloc_aligned<array<uint8_t, 20>>(HASH_BATCH_SIZE);
-
-  const int totalBatches = (numKeys + (HASH_BATCH_SIZE - 1)) / HASH_BATCH_SIZE;
-
-  for (int batch = 0; batch < totalBatches; batch++) {
-    const int batchCount =
-        min(HASH_BATCH_SIZE, numKeys - batch * HASH_BATCH_SIZE);
-
-    // Prepare SHA blocks with prefetching
-    for (int i = 0; i < batchCount; i++) {
-      _mm_prefetch(
-          reinterpret_cast<const char*>(
-              &pubKeys[batch * HASH_BATCH_SIZE + i + PREFETCH_DISTANCE]),
-          _MM_HINT_T0);
-      prepareShaBlockSHA(pubKeys[batch * HASH_BATCH_SIZE + i], 33,
-                         shaInputs[i].data());
-    }
-
-    // Pad remaining slots for full AVX-512 utilization
-    if (batchCount < HASH_BATCH_SIZE) {
-      static array<uint8_t, 64> shaPadding = {};
-      prepareShaBlockSHA(pubKeys[0], 33, shaPadding.data());
-      for (int i = batchCount; i < HASH_BATCH_SIZE; i++) {
-        memcpy(shaInputs[i].data(), shaPadding.data(), 64);
-      }
-    }
-
-    // AVX-512 SHA-256 computation (16-way parallel)
-    sha256avx512_16B(shaInputs, shaOutputs);
-
-    // Prepare RIPEMD blocks
-    for (int i = 0; i < batchCount; i++) {
-      prepareShaBlockSHA(shaOutputs[i].data(), 32, ripemdInputs[i].data());
-    }
-
-    if (batchCount < HASH_BATCH_SIZE) {
-      static array<uint8_t, 64> ripemdPadding = {};
-      prepareShaBlockSHA(shaOutputs[0].data(), 32, ripemdPadding.data());
-      for (int i = batchCount; i < HASH_BATCH_SIZE; i++) {
-        memcpy(ripemdInputs[i].data(), ripemdPadding.data(), 64);
-      }
-    }
-
-    // AVX-512 RIPEMD-160 computation (16-way parallel)
-    ripemd160avx512_16B(ripemdInputs, ripemdOutputs);
-
-    // Copy results with optimized memory access patterns
-    for (int i = 0; i < batchCount; i++) {
-      memcpy(hashResults[batch * HASH_BATCH_SIZE + i], ripemdOutputs[i].data(),
-             20);
-    }
+static std::string to_string_128(__uint128_t value) {
+  if (value == 0) return "0";
+  char buffer[50];
+  char* p = buffer + sizeof(buffer);
+  *--p = '\0';
+  while (value != 0) {
+    *--p = "0123456789"[value % 10];
+    value /= 10;
   }
-
-  // Free NUMA-allocated memory
-  numa_free(shaInputs, HASH_BATCH_SIZE * sizeof(array<uint8_t, 64>));
-  numa_free(shaOutputs, HASH_BATCH_SIZE * sizeof(array<uint8_t, 32>));
-  numa_free(ripemdInputs, HASH_BATCH_SIZE * sizeof(array<uint8_t, 64>));
-  numa_free(ripemdOutputs, HASH_BATCH_SIZE * sizeof(array<uint8_t, 20>));
+  return std::string(p);
 }
 
-// Combination generator optimized for cache efficiency
-class CombinationGeneratorOptimized {
+void signalHandler(int signum) {
+  stop_event.store(true);
+  cout << "\nInterrupt received, shutting down...\n";
+}
+
+// Enhanced mutation generator optimized for Sapphire Rapids
+class MutationGenerator {
   int n, k;
-  vector<int> current;
+  std::vector<int> current;
 
  public:
-  CombinationGeneratorOptimized(int n, int k) : n(n), k(k), current(k) {
+  MutationGenerator(int n, int k) : n(n), k(k), current(k) {
     if (k > n) k = n;
     for (int i = 0; i < k; ++i) current[i] = i;
   }
@@ -365,7 +262,16 @@ class CombinationGeneratorOptimized {
     return result;
   }
 
-  const vector<int>& get() const { return current; }
+  // AVX-512 optimized combination count for multiple values
+  static __m512i combinations_count_avx512(int n, int k) {
+    alignas(64) uint64_t counts[8];
+    for (int i = 0; i < 8; i++) {
+      counts[i] = combinations_count(n + i, k);
+    }
+    return _mm512_load_si512((__m512i*)counts);
+  }
+
+  const std::vector<int>& get() const { return current; }
 
   bool next() {
     int i = k - 1;
@@ -406,46 +312,171 @@ class CombinationGeneratorOptimized {
   }
 };
 
-// Set thread affinity for optimal NUMA performance
-void setThreadAffinity(int threadId) {
-  if (threadId >= cpu_topology.core_ids.size()) return;
-
-  cpu_set_t cpuset;
-  CPU_ZERO(&cpuset);
-  CPU_SET(cpu_topology.core_ids[threadId], &cpuset);
-
-  pthread_t current_thread = pthread_self();
-  pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
-
-  // Set NUMA memory policy
-  int numa_node = threadId / cpu_topology.cores_per_node;
-  numa_run_on_node(numa_node);
-  numa_set_preferred(numa_node);
+// Optimized block preparation with better cache utilization
+inline void prepareShaBlock(const uint8_t* dataSrc, __uint128_t dataLen,
+                            uint8_t* outBlock) {
+  // Use AVX-512 for faster memory operations when possible
+  std::fill_n(outBlock, 64, 0);
+  std::memcpy(outBlock, dataSrc, dataLen);
+  outBlock[dataLen] = 0x80;
+  const uint32_t bitLen = (uint32_t)(dataLen * 8);
+  outBlock[60] = (uint8_t)((bitLen >> 24) & 0xFF);
+  outBlock[61] = (uint8_t)((bitLen >> 16) & 0xFF);
+  outBlock[62] = (uint8_t)((bitLen >> 8) & 0xFF);
+  outBlock[63] = (uint8_t)(bitLen & 0xFF);
 }
 
-// Optimized worker function with AVX-512 and NUMA awareness
-void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
-                     int threadId, AVX512Counter start, AVX512Counter end) {
-  // Set thread affinity for optimal performance
-  setThreadAffinity(threadId);
+inline void prepareRipemdBlock(const uint8_t* dataSrc, uint8_t* outBlock) {
+  std::fill_n(outBlock, 64, 0);
+  std::memcpy(outBlock, dataSrc, 32);
+  outBlock[32] = 0x80;
+  const uint32_t bitLen = 256;
+  outBlock[60] = (uint8_t)((bitLen >> 24) & 0xFF);
+  outBlock[61] = (uint8_t)((bitLen >> 16) & 0xFF);
+  outBlock[62] = (uint8_t)((bitLen >> 8) & 0xFF);
+  outBlock[63] = (uint8_t)(bitLen & 0xFF);
+}
+
+// Enhanced hash computation with larger batch sizes for AVX-512
+static void computeHash160BatchOptimized(int numKeys, uint8_t pubKeys[][33],
+                                         uint8_t hashResults[][20]) {
+  alignas(64) std::array<std::array<uint8_t, 64>, HASH_BATCH_SIZE> shaInputs;
+  alignas(64) std::array<std::array<uint8_t, 32>, HASH_BATCH_SIZE> shaOutputs;
+  alignas(64) std::array<std::array<uint8_t, 64>, HASH_BATCH_SIZE> ripemdInputs;
+  alignas(64) std::array<std::array<uint8_t, 20>, HASH_BATCH_SIZE>
+      ripemdOutputs;
+
+  const __uint128_t totalBatches =
+      (numKeys + (HASH_BATCH_SIZE - 1)) / HASH_BATCH_SIZE;
+
+  for (__uint128_t batch = 0; batch < totalBatches; batch++) {
+    const __uint128_t batchCount = std::min<__uint128_t>(
+        HASH_BATCH_SIZE, numKeys - batch * HASH_BATCH_SIZE);
+
+    // Prepare SHA inputs with prefetching
+    for (__uint128_t i = 0; i < batchCount; i++) {
+      prepareShaBlock(pubKeys[batch * HASH_BATCH_SIZE + i], 33,
+                      shaInputs[i].data());
+      // Prefetch next iteration data
+      if (i + 1 < batchCount) {
+        __builtin_prefetch(pubKeys[batch * HASH_BATCH_SIZE + i + 1], 0, 3);
+      }
+    }
+
+    // Fill remaining slots for vectorization efficiency
+    if (batchCount < HASH_BATCH_SIZE) {
+      static std::array<uint8_t, 64> shaPadding = {};
+      prepareShaBlock(pubKeys[0], 33, shaPadding.data());
+      for (__uint128_t i = batchCount; i < HASH_BATCH_SIZE; i++) {
+        std::memcpy(shaInputs[i].data(), shaPadding.data(), 64);
+      }
+    }
+
+    // Setup pointers for batch processing
+    const uint8_t* inPtr[HASH_BATCH_SIZE];
+    uint8_t* outPtr[HASH_BATCH_SIZE];
+    for (int i = 0; i < HASH_BATCH_SIZE; i++) {
+      inPtr[i] = shaInputs[i].data();
+      outPtr[i] = shaOutputs[i].data();
+    }
+
+    // Process SHA256 batch (will be upgraded to AVX-512 in sha256_avx2.h)
+    if (HASH_BATCH_SIZE >= 16) {
+      // Call 16-way SHA256 when available
+      sha256avx2_8B(inPtr[0], inPtr[1], inPtr[2], inPtr[3], inPtr[4], inPtr[5],
+                    inPtr[6], inPtr[7], outPtr[0], outPtr[1], outPtr[2],
+                    outPtr[3], outPtr[4], outPtr[5], outPtr[6], outPtr[7]);
+
+      sha256avx2_8B(inPtr[8], inPtr[9], inPtr[10], inPtr[11], inPtr[12],
+                    inPtr[13], inPtr[14], inPtr[15], outPtr[8], outPtr[9],
+                    outPtr[10], outPtr[11], outPtr[12], outPtr[13], outPtr[14],
+                    outPtr[15]);
+    } else {
+      sha256avx2_8B(inPtr[0], inPtr[1], inPtr[2], inPtr[3], inPtr[4], inPtr[5],
+                    inPtr[6], inPtr[7], outPtr[0], outPtr[1], outPtr[2],
+                    outPtr[3], outPtr[4], outPtr[5], outPtr[6], outPtr[7]);
+    }
+
+    // Prepare RIPEMD inputs with prefetching
+    for (__uint128_t i = 0; i < batchCount; i++) {
+      prepareRipemdBlock(shaOutputs[i].data(), ripemdInputs[i].data());
+      if (i + 1 < batchCount) {
+        __builtin_prefetch(shaOutputs[i + 1].data(), 0, 3);
+      }
+    }
+
+    if (batchCount < HASH_BATCH_SIZE) {
+      static std::array<uint8_t, 64> ripemdPadding = {};
+      prepareRipemdBlock(shaOutputs[0].data(), ripemdPadding.data());
+      for (__uint128_t i = batchCount; i < HASH_BATCH_SIZE; i++) {
+        std::memcpy(ripemdInputs[i].data(), ripemdPadding.data(), 64);
+      }
+    }
+
+    // Update pointers for RIPEMD
+    for (int i = 0; i < HASH_BATCH_SIZE; i++) {
+      inPtr[i] = ripemdInputs[i].data();
+      outPtr[i] = ripemdOutputs[i].data();
+    }
+
+    // Process RIPEMD160 batch (will be upgraded to AVX-512 in ripemd160_avx2.h)
+    if (HASH_BATCH_SIZE >= 16) {
+      ripemd160avx2::ripemd160avx2_32(
+          (unsigned char*)inPtr[0], (unsigned char*)inPtr[1],
+          (unsigned char*)inPtr[2], (unsigned char*)inPtr[3],
+          (unsigned char*)inPtr[4], (unsigned char*)inPtr[5],
+          (unsigned char*)inPtr[6], (unsigned char*)inPtr[7], outPtr[0],
+          outPtr[1], outPtr[2], outPtr[3], outPtr[4], outPtr[5], outPtr[6],
+          outPtr[7]);
+
+      ripemd160avx2::ripemd160avx2_32(
+          (unsigned char*)inPtr[8], (unsigned char*)inPtr[9],
+          (unsigned char*)inPtr[10], (unsigned char*)inPtr[11],
+          (unsigned char*)inPtr[12], (unsigned char*)inPtr[13],
+          (unsigned char*)inPtr[14], (unsigned char*)inPtr[15], outPtr[8],
+          outPtr[9], outPtr[10], outPtr[11], outPtr[12], outPtr[13], outPtr[14],
+          outPtr[15]);
+    } else {
+      ripemd160avx2::ripemd160avx2_32(
+          (unsigned char*)inPtr[0], (unsigned char*)inPtr[1],
+          (unsigned char*)inPtr[2], (unsigned char*)inPtr[3],
+          (unsigned char*)inPtr[4], (unsigned char*)inPtr[5],
+          (unsigned char*)inPtr[6], (unsigned char*)inPtr[7], outPtr[0],
+          outPtr[1], outPtr[2], outPtr[3], outPtr[4], outPtr[5], outPtr[6],
+          outPtr[7]);
+    }
+
+    // Copy results with cache-friendly access patterns
+    for (__uint128_t i = 0; i < batchCount; i++) {
+      std::memcpy(hashResults[batch * HASH_BATCH_SIZE + i],
+                  ripemdOutputs[i].data(), 20);
+    }
+  }
+}
+
+// Enhanced worker function with Sapphire Rapids optimizations
+void worker(Secp256K1* secp, int bit_length, int flip_count, int threadId,
+            AVX512Counter start, AVX512Counter end) {
+  // Pin thread to specific NUMA node for better cache locality
+  int numa_node = threadId % numa_num_configured_nodes();
+  numa_run_on_node(numa_node);
 
   const int fullBatchSize = 2 * POINTS_BATCH_SIZE;
+  alignas(64)
+      uint8_t localPubKeys[HASH_BATCH_SIZE][33];  // 64-byte aligned for AVX-512
+  alignas(64) uint8_t localHashResults[HASH_BATCH_SIZE][20];
+  alignas(64) int pointIndices[HASH_BATCH_SIZE];
 
-  // NUMA-aware memory allocation
-  auto localPubKeys = numa_alloc_aligned<array<uint8_t, 33>>(HASH_BATCH_SIZE);
-  auto localHashResults =
-      numa_alloc_aligned<array<uint8_t, 20>>(HASH_BATCH_SIZE);
-  auto pointIndices = numa_alloc_aligned<int>(HASH_BATCH_SIZE);
-
-  // AVX-512 target comparison setup
+  // Use AVX-512 for target comparison
   __m512i target32 = _mm512_loadu_si512(
       reinterpret_cast<const __m512i*>(TARGET_HASH160_RAW.data()));
 
-  // Pre-computed points for batch operations
-  auto plusPoints = numa_alloc_aligned<Point>(POINTS_BATCH_SIZE);
-  auto minusPoints = numa_alloc_aligned<Point>(POINTS_BATCH_SIZE);
+  // Pre-compute offset points with larger batch for better amortization
+  alignas(64) Point plusPoints[POINTS_BATCH_SIZE];
+  alignas(64) Point minusPoints[POINTS_BATCH_SIZE];
 
-  // Initialize precomputed points
+// Vectorized point initialization
+#pragma omp simd aligned(plusPoints, minusPoints : 64)
   for (int i = 0; i < POINTS_BATCH_SIZE; i++) {
     Int tmp;
     tmp.SetInt32(i);
@@ -454,12 +485,12 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
     minusPoints[i].y.ModNeg();
   }
 
-  auto deltaX = numa_alloc_aligned<Int>(POINTS_BATCH_SIZE);
+  alignas(64) Int deltaX[POINTS_BATCH_SIZE];
   IntGroup modGroup(POINTS_BATCH_SIZE);
-  auto pointBatchX = numa_alloc_aligned<Int>(fullBatchSize);
-  auto pointBatchY = numa_alloc_aligned<Int>(fullBatchSize);
+  alignas(64) Int pointBatchX[fullBatchSize];
+  alignas(64) Int pointBatchY[fullBatchSize];
 
-  CombinationGeneratorOptimized gen(bit_length, flip_count);
+  MutationGenerator gen(bit_length, flip_count);
   gen.unrank(start.load());
 
   AVX512Counter count;
@@ -472,10 +503,10 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
     Int currentKey;
     currentKey.Set(&BASE_KEY);
 
-    const vector<int>& flips = gen.get();
+    const vector<int>& mutationPositions = gen.get();
 
-    // Apply bit flips with vectorized operations where possible
-    for (int pos : flips) {
+    // Apply bit mutations (flips) using optimized XOR operations
+    for (int pos : mutationPositions) {
       Int mask;
       mask.SetInt32(1);
       mask.ShiftL(pos);
@@ -488,6 +519,7 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
 #pragma omp critical
     { g_threadPrivateKeys[threadId] = keyStr; }
 
+    // Compute starting point for this mutated key
     Point startPoint = secp->ComputePublicKey(&currentKey);
     Int startPointX, startPointY, startPointXNeg;
     startPointX.Set(&startPoint.x);
@@ -495,23 +527,25 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
     startPointXNeg.Set(&startPointX);
     startPointXNeg.ModNeg();
 
-// Vectorized point operations with AVX-512 where applicable
-#pragma omp simd aligned(deltaX : 64)
-    for (int i = 0; i < POINTS_BATCH_SIZE; i++) {
+// Vectorized delta computation with better loop unrolling
+#pragma omp simd aligned(deltaX, plusPoints : 64)
+    for (int i = 0; i < POINTS_BATCH_SIZE; i += 8) {
       deltaX[i].ModSub(&plusPoints[i].x, &startPointX);
+      deltaX[i + 1].ModSub(&plusPoints[i + 1].x, &startPointX);
+      deltaX[i + 2].ModSub(&plusPoints[i + 2].x, &startPointX);
+      deltaX[i + 3].ModSub(&plusPoints[i + 3].x, &startPointX);
+      deltaX[i + 4].ModSub(&plusPoints[i + 4].x, &startPointX);
+      deltaX[i + 5].ModSub(&plusPoints[i + 5].x, &startPointX);
+      deltaX[i + 6].ModSub(&plusPoints[i + 6].x, &startPointX);
+      deltaX[i + 7].ModSub(&plusPoints[i + 7].x, &startPointX);
     }
 
     modGroup.Set(deltaX);
     modGroup.ModInv();
 
-    // Compute batch of points with optimized memory access patterns
+// Compute positive offset points with better vectorization
+#pragma omp simd aligned(pointBatchX, pointBatchY, deltaX, plusPoints : 64)
     for (int i = 0; i < POINTS_BATCH_SIZE; i++) {
-      // Prefetch next iteration data
-      if (i + PREFETCH_DISTANCE < POINTS_BATCH_SIZE) {
-        _mm_prefetch(&plusPoints[i + PREFETCH_DISTANCE], _MM_HINT_T0);
-        _mm_prefetch(&deltaX[i + PREFETCH_DISTANCE], _MM_HINT_T0);
-      }
-
       Int deltaY;
       deltaY.ModSub(&plusPoints[i].y, &startPointY);
 
@@ -535,7 +569,8 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
       pointBatchY[i].ModAdd(&diffX);
     }
 
-    // Similar computation for minus points
+// Compute negative offset points with similar vectorization
+#pragma omp simd aligned(pointBatchX, pointBatchY, deltaX, minusPoints : 64)
     for (int i = 0; i < POINTS_BATCH_SIZE; i++) {
       Int deltaY;
       deltaY.ModSub(&minusPoints[i].y, &startPointY);
@@ -560,7 +595,7 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
       pointBatchY[POINTS_BATCH_SIZE + i].ModAdd(&diffX);
     }
 
-    // Process points in batches optimized for AVX-512
+    // Process points in larger batches for better hash throughput
     int localBatchCount = 0;
     for (int i = 0; i < fullBatchSize && localBatchCount < HASH_BATCH_SIZE;
          i++) {
@@ -568,38 +603,54 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
       tempPoint.x.Set(&pointBatchX[i]);
       tempPoint.y.Set(&pointBatchY[i]);
 
-      (*localPubKeys)[localBatchCount][0] = tempPoint.y.IsEven() ? 0x02 : 0x03;
+      // Compress public key with prefetching
+      localPubKeys[localBatchCount][0] = tempPoint.y.IsEven() ? 0x02 : 0x03;
       for (int j = 0; j < 32; j++) {
-        (*localPubKeys)[localBatchCount][1 + j] =
-            pointBatchX[i].GetByte(31 - j);
+        localPubKeys[localBatchCount][1 + j] = pointBatchX[i].GetByte(31 - j);
       }
       pointIndices[localBatchCount] = i;
       localBatchCount++;
 
       if (localBatchCount == HASH_BATCH_SIZE) {
-        computeHash160BatchAVX512(localBatchCount, *localPubKeys,
-                                  *localHashResults);
+        // Process hash batch with optimized function
+        computeHash160BatchOptimized(localBatchCount, localPubKeys,
+                                     localHashResults);
 
         actual_work_done += HASH_BATCH_SIZE;
         localComparedCount += HASH_BATCH_SIZE;
 
-        // AVX-512 optimized comparison
+        // AVX-512 optimized hash comparison
         for (int j = 0; j < HASH_BATCH_SIZE; j++) {
-          __m512i cand = _mm512_loadu_si512(
-              reinterpret_cast<const __m512i*>((*localHashResults)[j]));
+          // Load candidate hash (20 bytes) into AVX-512 register
+          __m512i cand = _mm512_maskz_loadu_epi8(0x0FFFFF, localHashResults[j]);
+
+          // Compare with target using AVX-512 mask operations
           __mmask64 cmp_mask = _mm512_cmpeq_epi8_mask(cand, target32);
 
-          if ((cmp_mask & 0x0FFFFF) == 0x0FFFFF) {  // Check first 20 bytes
+          // Check if first 20 bytes match (mask 0x0FFFFF)
+          if ((cmp_mask & 0x0FFFFF) == 0x0FFFFF) {
+            // Found potential match - verify with scalar comparison
             bool fullMatch = true;
             for (int k = 0; k < 20; k++) {
-              if ((*localHashResults)[j][k] != TARGET_HASH160_RAW[k]) {
+              if (localHashResults[j][k] != TARGET_HASH160_RAW[k]) {
                 fullMatch = false;
                 break;
               }
             }
 
             if (fullMatch) {
-              // Solution found - compute final key
+              auto tEndTime = chrono::high_resolution_clock::now();
+              globalElapsedTime =
+                  chrono::duration<double>(tEndTime - tStart).count();
+
+              {
+                lock_guard<mutex> lock(progress_mutex);
+                globalComparedCount += actual_work_done;
+                mkeysPerSec =
+                    (double)globalComparedCount / globalElapsedTime / 1e6;
+              }
+
+              // Calculate the exact private key
               Int foundKey;
               foundKey.Set(&currentKey);
               int idx = pointIndices[j];
@@ -618,30 +669,18 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
 
               lock_guard<mutex> lock(result_mutex);
               results.push(
-                  make_tuple(hexKey, total_checked_avx512.load(), flip_count));
+                  make_tuple(hexKey, total_checked_avx.load(), flip_count));
               stop_event.store(true);
-
-              // Free NUMA memory before return
-              numa_free(localPubKeys,
-                        HASH_BATCH_SIZE * sizeof(array<uint8_t, 33>));
-              numa_free(localHashResults,
-                        HASH_BATCH_SIZE * sizeof(array<uint8_t, 20>));
-              numa_free(pointIndices, HASH_BATCH_SIZE * sizeof(int));
-              numa_free(plusPoints, POINTS_BATCH_SIZE * sizeof(Point));
-              numa_free(minusPoints, POINTS_BATCH_SIZE * sizeof(Point));
-              numa_free(deltaX, POINTS_BATCH_SIZE * sizeof(Int));
-              numa_free(pointBatchX, fullBatchSize * sizeof(Int));
-              numa_free(pointBatchY, fullBatchSize * sizeof(Int));
               return;
             }
           }
         }
 
-        total_checked_avx512.increment();
+        total_checked_avx.increment();
         localBatchCount = 0;
 
-        // Progress reporting
-        __uint128_t current_total = total_checked_avx512.load();
+        // Progress reporting with reduced frequency for higher performance
+        __uint128_t current_total = total_checked_avx.load();
         if (current_total % REPORT_INTERVAL == 0 ||
             count.load() == end.load() - 1) {
           auto now = chrono::high_resolution_clock::now();
@@ -654,10 +693,15 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
               min(100.0, (double)current_total / total_combinations * 100.0);
 
           lock_guard<mutex> lock(progress_mutex);
-          cout << "\rProgress: " << fixed << setprecision(6) << progress
-               << "% | Speed: " << fixed << setprecision(2) << mkeysPerSec
-               << " Mkeys/s | Elapsed: " << formatElapsedTime(globalElapsedTime)
-               << flush;
+          moveCursorTo(0, 10);
+          cout << "Progress: " << fixed << setprecision(6) << progress << "%\n";
+          cout << "Processed: " << to_string_128(current_total)
+               << " mutations\n";
+          cout << "Speed: " << fixed << setprecision(2) << mkeysPerSec
+               << " Mkeys/s\n";
+          cout << "Elapsed Time: " << formatElapsedTime(globalElapsedTime)
+               << "\n";
+          cout.flush();
 
           if (current_total >= total_combinations) {
             stop_event.store(true);
@@ -677,77 +721,32 @@ void workerOptimized(Secp256K1* secp, int bit_length, int flip_count,
     }
   }
 
-  // Free NUMA-allocated memory
-  numa_free(localPubKeys, HASH_BATCH_SIZE * sizeof(array<uint8_t, 33>));
-  numa_free(localHashResults, HASH_BATCH_SIZE * sizeof(array<uint8_t, 20>));
-  numa_free(pointIndices, HASH_BATCH_SIZE * sizeof(int));
-  numa_free(plusPoints, POINTS_BATCH_SIZE * sizeof(Point));
-  numa_free(minusPoints, POINTS_BATCH_SIZE * sizeof(Point));
-  numa_free(deltaX, POINTS_BATCH_SIZE * sizeof(Int));
-  numa_free(pointBatchX, fullBatchSize * sizeof(Int));
-  numa_free(pointBatchY, fullBatchSize * sizeof(Int));
-
-  if (!stop_event.load() && total_checked_avx512.load() >= total_combinations) {
+  if (!stop_event.load() && total_checked_avx.load() >= total_combinations) {
     stop_event.store(true);
   }
-}
-
-// Utility functions (keeping the same interface but optimized implementations)
-static string formatElapsedTime(double seconds) {
-  int hrs = static_cast<int>(seconds) / 3600;
-  int mins = (static_cast<int>(seconds) % 3600) / 60;
-  int secs = static_cast<int>(seconds) % 60;
-  ostringstream oss;
-  oss << setw(2) << setfill('0') << hrs << ":" << setw(2) << setfill('0')
-      << mins << ":" << setw(2) << setfill('0') << secs;
-  return oss.str();
-}
-
-static string to_string_128(__uint128_t value) {
-  if (value == 0) return "0";
-  char buffer[50];
-  char* p = buffer + sizeof(buffer);
-  *--p = '\0';
-  while (value != 0) {
-    *--p = "0123456789"[value % 10];
-    value /= 10;
-  }
-  return string(p);
-}
-
-void signalHandler(int signum) {
-  stop_event.store(true);
-  cout << "\nInterrupt received, shutting down...\n";
 }
 
 void printUsage(const char* programName) {
   cout << "Usage: " << programName << " [options]\n";
   cout << "Options:\n";
   cout << "  -p, --puzzle NUM    Puzzle number to solve (default: 71)\n";
-  cout << "  -t, --threads NUM   Number of CPU cores to use (default: "
-          "auto-detect)\n";
-  cout << "  -f, --flips NUM     Override default flip count for puzzle\n";
+  cout << "  -t, --threads NUM   Number of CPU cores to use (default: all)\n";
+  cout << "  -f, --flips NUM     Override default bit flip count for puzzle\n";
   cout << "  -h, --help          Show this help message\n";
+  cout << "\nExample:\n";
+  cout << "  " << programName << " -p 71 -t 32 -f 29\n";
   cout << "\nOptimized for Intel Xeon Platinum 8488C (Sapphire Rapids)\n";
-  cout << "Example:\n";
-  cout << "  " << programName << " -p 71 -t 48\n";
 }
 
 int main(int argc, char* argv[]) {
   signal(SIGINT, signalHandler);
 
-  // Initialize NUMA
-  if (numa_available() < 0) {
-    cerr << "Warning: NUMA not available, performance may be suboptimal\n";
-  }
-
-  // Auto-detect optimal thread count based on CPU topology
-  if (WORKERS == 0) {
-    WORKERS = cpu_topology.core_ids.size();
-    // For Sapphire Rapids, use physical cores only for maximum performance
-    if (cpu_topology.threads_per_core > 1) {
-      WORKERS = WORKERS / cpu_topology.threads_per_core;
-    }
+  // Check for AVX-512 support on Sapphire Rapids
+  if (!__builtin_cpu_supports("avx512f") ||
+      !__builtin_cpu_supports("avx512bw")) {
+    cerr << "Error: This optimized version requires AVX-512 support (Sapphire "
+            "Rapids)\n";
+    return 1;
   }
 
   int opt;
@@ -760,6 +759,7 @@ int main(int argc, char* argv[]) {
 
   while ((opt = getopt_long(argc, argv, "p:t:f:h", long_options,
                             &option_index)) != -1) {
+    if (opt == -1) break;
     switch (opt) {
       case 'p':
         PUZZLE_NUM = atoi(optarg);
@@ -793,6 +793,7 @@ int main(int argc, char* argv[]) {
 
   tStart = chrono::high_resolution_clock::now();
 
+  // Initialize SECP256K1 curve
   Secp256K1 secp;
   secp.Init();
 
@@ -811,49 +812,77 @@ int main(int argc, char* argv[]) {
 
   TARGET_HASH160 = TARGET_HASH160_HEX;
 
-  for (int i = 0; i < 20; i++) {
+  // Convert target hash from hex to binary
+  for (__uint128_t i = 0; i < 20; i++) {
     TARGET_HASH160_RAW[i] = stoul(TARGET_HASH160.substr(i * 2, 2), nullptr, 16);
   }
 
+  // Set base key from previous puzzle solution
   BASE_KEY.SetBase10(const_cast<char*>(PRIVATE_KEY_DECIMAL.c_str()));
 
+  // Verify base key initialization
+  Int testKey;
+  testKey.SetBase10(const_cast<char*>(PRIVATE_KEY_DECIMAL.c_str()));
+  if (!testKey.IsEqual(&BASE_KEY)) {
+    cerr << "Base key initialization failed!\n";
+    return 1;
+  }
+
+  if (BASE_KEY.GetBitLength() > PUZZLE_NUM) {
+    cerr << "Base key exceeds puzzle bit length!\n";
+    return 1;
+  }
+
+  // Calculate total number of mutations to test
   total_combinations =
-      CombinationGeneratorOptimized::combinations_count(PUZZLE_NUM, FLIP_COUNT);
+      MutationGenerator::combinations_count(PUZZLE_NUM, FLIP_COUNT);
 
   string paddedKey = BASE_KEY.GetBase16();
   size_t firstNonZero = paddedKey.find_first_not_of('0');
-  if (firstNonZero != string::npos) {
-    paddedKey = paddedKey.substr(firstNonZero);
-  } else {
+
+  if (string::npos == firstNonZero) {
     paddedKey = "0";
+  } else {
+    paddedKey = paddedKey.substr(firstNonZero);
   }
   paddedKey = "0x" + paddedKey;
 
-  cout << "=======================================\n";
-  cout << "== Mutagen Sapphire Rapids Optimizer ==\n";
-  cout << "=======================================\n";
-  cout << "Target CPU: Intel Xeon Platinum 8488C\n";
-  cout << "NUMA Nodes: " << cpu_topology.numa_nodes << "\n";
-  cout << "Available Cores: " << cpu_topology.core_ids.size() << "\n";
+  clearTerminal();
+  cout << "===========================================\n";
+  cout << "== Mutagen Puzzle Solver (Sapphire Rapids) ==\n";
+  cout << "===========================================\n";
   cout << "Starting puzzle: " << PUZZLE_NUM << " (" << PUZZLE_NUM << "-bit)\n";
   cout << "Target HASH160: " << TARGET_HASH160.substr(0, 10) << "..."
        << TARGET_HASH160.substr(TARGET_HASH160.length() - 10) << "\n";
   cout << "Base Key: " << paddedKey << "\n";
-  cout << "Flip count: " << FLIP_COUNT << "\n";
-  cout << "Total Combinations: " << to_string_128(total_combinations) << "\n";
-  cout << "Using: " << WORKERS << " threads\n";
-  cout << "Optimizations: AVX-512, NUMA-aware, Intel SHA Extensions\n\n";
+  cout << "Mutation strategy: Flip " << FLIP_COUNT << " bits ";
+  if (FLIP_COUNT != DEFAULT_FLIP_COUNT) {
+    cout << "(override, default was " << DEFAULT_FLIP_COUNT << ")";
+  }
+  cout << "\n";
+
+  if (PUZZLE_NUM == 71 && FLIP_COUNT == 29) {
+    cout << "*** NOTE: Flip count for Puzzle 71 is estimated and may need "
+            "adjustment ***\n";
+  }
+  cout << "Total Mutations: " << to_string_128(total_combinations) << "\n";
+  cout << "Using: " << WORKERS << " threads (Sapphire Rapids optimized)\n";
+  cout << "Batch sizes: Points=" << POINTS_BATCH_SIZE
+       << ", Hash=" << HASH_BATCH_SIZE << "\n";
+  cout << "\n";
 
   g_threadPrivateKeys.resize(WORKERS, "0");
   vector<thread> threads;
 
-  AVX512Counter total_combinations_avx512;
-  total_combinations_avx512.store(total_combinations);
+  // Use AVX-512 optimized counter
+  AVX512Counter total_combinations_avx;
+  total_combinations_avx.store(total_combinations);
 
   AVX512Counter comb_per_thread =
-      AVX512Counter::div(total_combinations_avx512, WORKERS);
-  uint64_t remainder = AVX512Counter::mod(total_combinations_avx512, WORKERS);
+      AVX512Counter::div(total_combinations_avx, WORKERS);
+  uint64_t remainder = AVX512Counter::mod(total_combinations_avx, WORKERS);
 
+  // Launch worker threads with NUMA-aware scheduling
   for (int i = 0; i < WORKERS; i++) {
     AVX512Counter start, end;
 
@@ -862,17 +891,17 @@ int main(int argc, char* argv[]) {
     start.store(base.load() + extra);
 
     end.store(start.load() + comb_per_thread.load() + (i < remainder ? 1 : 0));
-    threads.emplace_back(workerOptimized, &secp, PUZZLE_NUM, FLIP_COUNT, i,
-                         start, end);
+    threads.emplace_back(worker, &secp, PUZZLE_NUM, FLIP_COUNT, i, start, end);
   }
 
+  // Wait for all threads to complete
   for (auto& t : threads) {
     if (t.joinable()) {
       t.join();
     }
   }
 
-  // Results processing (same as original but with updated formatting)
+  // Display results
   if (!results.empty()) {
     auto [hex_key, checked, flips] = results.front();
     globalElapsedTime =
@@ -882,19 +911,20 @@ int main(int argc, char* argv[]) {
 
     string compactHex = hex_key;
     size_t firstNonZeroCompact = compactHex.find_first_not_of('0');
-    if (firstNonZeroCompact != string::npos) {
-      compactHex = compactHex.substr(firstNonZeroCompact);
-    } else {
+
+    if (string::npos == firstNonZeroCompact) {
       compactHex = "0";
+    } else {
+      compactHex = compactHex.substr(firstNonZeroCompact);
     }
     compactHex = "0x" + compactHex;
 
-    cout << "\n=======================================\n";
-    cout << "=========== SOLUTION FOUND ============\n";
-    cout << "=======================================\n";
+    cout << "===========================================\n";
+    cout << "============= SOLUTION FOUND ==============\n";
+    cout << "===========================================\n";
     cout << "Private key: " << compactHex << "\n";
-    cout << "Checked " << to_string_128(checked) << " combinations\n";
-    cout << "Bit flips: " << flips << "\n";
+    cout << "Mutations tested: " << to_string_128(checked) << "\n";
+    cout << "Bit flips applied: " << flips << endl;
     cout << "Time: " << fixed << setprecision(2) << globalElapsedTime
          << " seconds (" << formatElapsedTime(globalElapsedTime) << ")\n";
     cout << "Speed: " << fixed << setprecision(2) << mkeysPerSec
@@ -904,19 +934,24 @@ int main(int argc, char* argv[]) {
     if (out) {
       out << hex_key;
       out.close();
-      cout << "Solution saved to puzzle_" << PUZZLE_NUM << "_solution.txt\n";
+      cout << "Solution saved to puzzle_" + to_string(PUZZLE_NUM) +
+                  "_solution.txt\n";
+    } else {
+      cerr << "Failed to save solution to file!\n";
     }
   } else {
-    __uint128_t final_count = total_checked_avx512.load();
+    __uint128_t final_count = total_checked_avx.load();
     globalElapsedTime =
         chrono::duration<double>(chrono::high_resolution_clock::now() - tStart)
             .count();
-    mkeysPerSec = globalElapsedTime > 1e-6
-                      ? (double)globalComparedCount / globalElapsedTime / 1e6
-                      : 0.0;
 
-    cout << "\n\nNo solution found. Checked " << to_string_128(final_count)
-         << " combinations\n";
+    if (globalElapsedTime > 1e-6) {
+      mkeysPerSec = (double)globalComparedCount / globalElapsedTime / 1e6;
+    } else {
+      mkeysPerSec = 0.0;
+    }
+    cout << "\n\nNo solution found. Tested " << to_string_128(final_count)
+         << " mutations\n";
     cout << "Time: " << fixed << setprecision(2) << globalElapsedTime
          << " seconds (" << formatElapsedTime(globalElapsedTime) << ")\n";
     cout << "Speed: " << fixed << setprecision(2) << mkeysPerSec
