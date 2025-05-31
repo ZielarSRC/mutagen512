@@ -1,35 +1,43 @@
-// Big integer class optimized for AVX-512 on Intel Xeon Platinum 8488C
+// Big integer class (Fixed size) - Optimized for Xeon Platinum 8488C with AVX-512
 
 #ifndef BIGINTH
 #define BIGINTH
 
-#include <immintrin.h>  // For full AVX-512 support
+#include <immintrin.h>
 #include <inttypes.h>
+#include <omp.h>
 
 #include <string>
 
-// We need 1 extra block for Knuth div algorithm, Montgomery multiplication and ModInv
+// We need 1 extra block for Knuth div algorithm , Montgomery multiplication and ModInv
 #define BISIZE 256
 
 #if BISIZE == 256
-#define NB64BLOCK 5   // Number of 64-bit blocks
-#define NB32BLOCK 10  // Number of 32-bit blocks
+#define NB64BLOCK 5
+#define NB32BLOCK 10
 #elif BISIZE == 512
 #define NB64BLOCK 9
 #define NB32BLOCK 18
 #else
-#error Unsupported size
+#error Unsuported size
+#endif
+
+// Fix for compatibility issues with GCC on Linux
+#ifndef WIN64
+#undef _addcarry_u64
+#define _addcarry_u64(c, a, b, r) _addcarryx_u64((c), (a), (b), (unsigned long long *)(r))
+#undef _subborrow_u64
+#define _subborrow_u64(c, a, b, r) _subborrow_u64((c), (a), (b), (unsigned long long *)(r))
 #endif
 
 class Int {
  public:
-  // Constructors
   Int();
   Int(int64_t i64);
   Int(uint64_t u64);
   Int(Int *a);
 
-  // Arithmetic operations
+  // Op
   void Add(uint64_t a);
   void Add(Int *a);
   void Add(Int *a, Int *b);
@@ -49,19 +57,19 @@ class Int {
   void Neg();
   void Abs();
 
-  // Shift operations (optimized for AVX-512)
+  // Right shift (signed)
   void ShiftR(uint32_t n);
   void ShiftR32Bit();
   void ShiftR64Bit();
+  // Left shift
   void ShiftL(uint32_t n);
   void ShiftL32Bit();
   void ShiftL64Bit();
-
-  // Bit manipulation
+  // Bit swap
   void SwapBit(int bitNumber);
   void Xor(const Int *a);
 
-  // Comparison operations (optimized with AVX-512 masks)
+  // Comp
   bool IsGreater(Int *a);
   bool IsGreaterOrEqual(Int *a);
   bool IsLowerOrEqual(Int *a);
@@ -76,40 +84,50 @@ class Int {
   bool IsOdd();
   bool IsProbablePrime();
 
-  // Conversion
   double ToDouble();
 
-  // Modular arithmetic (optimized for AVX-512)
-  static void SetupField(Int *n, Int *R = NULL, Int *R2 = NULL, Int *R3 = NULL, Int *R4 = NULL);
-  static Int *GetR();
-  static Int *GetR2();
-  static Int *GetR3();
-  static Int *GetR4();
-  static Int *GetFieldCharacteristic();
+  // Modular arithmetic
 
-  void GCD(Int *a);
-  void Mod(Int *n);
-  void ModInv();
-  void MontgomeryMult(Int *a, Int *b);
-  void MontgomeryMult(Int *a);
-  void ModAdd(Int *a);
-  void ModAdd(Int *a, Int *b);
-  void ModAdd(uint64_t a);
-  void ModSub(Int *a);
-  void ModSub(Int *a, Int *b);
-  void ModSub(uint64_t a);
-  void ModMul(Int *a, Int *b);
-  void ModMul(Int *a);
-  void ModSquare(Int *a);
-  void ModCube(Int *a);
-  void ModDouble();
-  void ModExp(Int *e);
-  void ModNeg();
-  void ModSqrt();
-  bool HasSqrt();
+  // Setup field
+  // n is the field characteristic
+  // R used in Montgomery mult (R = 2^size(n))
+  // R2 = R^2, R3 = R^3, R4 = R^4
+  static void SetupField(Int *n, Int *R = NULL, Int *R2 = NULL, Int *R3 = NULL, Int *R4 = NULL);
+  static Int *GetR();                    // Return R
+  static Int *GetR2();                   // Return R2
+  static Int *GetR3();                   // Return R3
+  static Int *GetR4();                   // Return R4
+  static Int *GetFieldCharacteristic();  // Return field characteristic
+
+  void GCD(Int *a);                     // this <- GCD(this,a)
+  void Mod(Int *n);                     // this <- this (mod n)
+  void ModInv();                        // this <- this^-1 (mod n)
+  void MontgomeryMult(Int *a, Int *b);  // this <- a*b*R^-1 (mod n)
+  void MontgomeryMult(Int *a);          // this <- this*a*R^-1 (mod n)
+  void ModAdd(Int *a);                  // this <- this+a (mod n) [0<a<P]
+  void ModAdd(Int *a, Int *b);          // this <- a+b (mod n) [0<a,b<P]
+  void ModAdd(uint64_t a);              // this <- this+a (mod n) [0<a<P]
+  void ModSub(Int *a);                  // this <- this-a (mod n) [0<a<P]
+  void ModSub(Int *a, Int *b);          // this <- a-b (mod n) [0<a,b<P]
+  void ModSub(uint64_t a);              // this <- this-a (mod n) [0<a<P]
+  void ModMul(Int *a, Int *b);          // this <- a*b (mod n)
+  void ModMul(Int *a);                  // this <- this*b (mod n)
+  void ModSquare(Int *a);               // this <- a^2 (mod n)
+  void ModCube(Int *a);                 // this <- a^3 (mod n)
+  void ModDouble();                     // this <- 2*this (mod n)
+  void ModExp(Int *e);                  // this <- this^e (mod n)
+  void ModNeg();                        // this <- -this (mod n)
+  void ModSqrt();                       // this <- +/-sqrt(this) (mod n)
+  bool HasSqrt();                       // true if this admit a square root
   void imm_umul_asm(const uint64_t *a, uint64_t b, uint64_t *res);
 
-  // Secp256k1 specific functions
+  // Batch operations optimized for AVX-512
+  static void BatchModAdd(Int *a, Int *b, Int *results, int count);
+  static void BatchModSub(Int *a, Int *b, Int *results, int count);
+  static void BatchModMul(Int *a, Int *b, Int *results, int count);
+  static void BatchModInv(Int *a, Int *results, int count);
+
+  // Specific SecpK1
   static void InitK1(Int *order);
   void ModMulK1(Int *a, Int *b);
   void ModMulK1(Int *a);
@@ -121,12 +139,12 @@ class Int {
   void ModNegK1order();
   uint32_t ModPositiveK1();
 
-  // Size functions
-  int GetSize();
-  int GetSize64();
-  int GetBitLength();
+  // Size
+  int GetSize();       // Number of significant 32bit limbs
+  int GetSize64();     // Number of significant 64bit limbs
+  int GetBitLength();  // Number of significant bits
 
-  // Setter methods
+  // Setter
   void SetInt32(uint32_t value);
   void Set(Int *a);
   void SetBase10(char *value);
@@ -140,13 +158,13 @@ class Int {
   void Set32Bytes(unsigned char *bytes);
   void MaskByte(int n);
 
-  // Getter methods
+  // Getter
   uint32_t GetInt32();
   int GetBit(uint32_t n);
   unsigned char GetByte(int n);
   void Get32Bytes(unsigned char *buff);
 
-  // String conversion (optimized for AVX-512)
+  // To String
   std::string GetBase2();
   std::string GetBase10();
   std::string GetBase16();
@@ -154,21 +172,20 @@ class Int {
   std::string GetBlockStr();
   std::string GetC64Str(int nbDigit);
 
-  // Validation functions
+  // Check functions
   static void Check();
   static bool CheckInv(Int *a);
 
-  // Static field values
-  static Int alignas(64) P;  // Aligned for AVX-512
+  // Static variable for field characteristic, aligned for AVX-512
+  alignas(64) static Int P;
 
-  // Data storage - aligned for optimal AVX-512 performance
+  // Aligned union for AVX-512 optimization
   union alignas(64) {
     uint32_t bits[NB32BLOCK];
     uint64_t bits64[NB64BLOCK];
   };
 
  private:
-  // Helper methods
   void MatrixVecMul(Int *u, Int *v, int64_t _11, int64_t _12, int64_t _21, int64_t _22,
                     uint64_t *cu, uint64_t *cv);
   void MatrixVecMul(Int *u, Int *v, int64_t _11, int64_t _12, int64_t _21, int64_t _22);
@@ -185,17 +202,13 @@ class Int {
                  int64_t *vv);
 };
 
-// Inline routines optimized for AVX-512
+// Inline routines
 
-// AVX-512 optimized intrinsics for Intel Xeon Platinum 8488C
-#ifdef _WIN64
-#include <intrin.h>
-#define TZC(x) _tzcnt_u64(x)
-#define LZC(x) _lzcnt_u64(x)
-#else
-// Linux/Unix version of intrinsics
+#ifndef WIN64
+
+// Missing intrinsics
 inline uint64_t _umul128(uint64_t a, uint64_t b, uint64_t *h) {
-#if defined(__AVX512F__) && defined(__BMI2__)
+#if defined(__BMI2__)
   uint64_t rlo, rhi;
   __asm__("mulx %[B], %[LO], %[HI]" : [LO] "=r"(rlo), [HI] "=r"(rhi) : "d"(a), [B] "r"(b) : "cc");
   *h = rhi;
@@ -211,20 +224,24 @@ inline uint64_t _umul128(uint64_t a, uint64_t b, uint64_t *h) {
 int64_t inline _mul128(int64_t a, int64_t b, int64_t *h) {
   uint64_t rhi;
   uint64_t rlo;
-  __asm__("imulq %[b];" : "=d"(rhi), "=a"(rlo) : "1"(a), [b] "rm"(b));
+  __asm__("imulq  %[b];" : "=d"(rhi), "=a"(rlo) : "1"(a), [b] "rm"(b));
   *h = rhi;
   return rlo;
 }
 
 static inline uint64_t _udiv128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *r) {
-  uint64_t q, rem;
-  __asm__("divq %4" : "=d"(rem), "=a"(q) : "a"(lo), "d"(hi), "r"(d) : "cc");
+  uint64_t q;
+  uint64_t rem;
+
+  asm("divq %4" : "=d"(rem), "=a"(q) : "a"(lo), "d"(hi), "r"(d) : "cc");
+
   *r = rem;
   return q;
 }
 
 static uint64_t inline my_rdtsc() {
-  uint32_t h, l;
+  uint32_t h;
+  uint32_t l;
   __asm__("rdtsc;" : "=d"(h), "=a"(l));
   return (uint64_t)h << 32 | (uint64_t)l;
 }
@@ -232,14 +249,18 @@ static uint64_t inline my_rdtsc() {
 #define __shiftright128(a, b, n) ((a) >> (n)) | ((b) << (64 - (n)))
 #define __shiftleft128(a, b, n) ((b) << (n)) | ((a) >> (64 - (n)))
 
-#define _subborrow_u64(a, b, c, d) __builtin_ia32_sbb_u64(a, b, c, (long long unsigned int *)d)
-#define _addcarry_u64(a, b, c, d) __builtin_ia32_addcarryx_u64(a, b, c, (long long unsigned int *)d)
 #define _byteswap_uint64 __builtin_bswap64
 #define LZC(x) __builtin_clzll(x)
 #define TZC(x) __builtin_ctzll(x)
+
+#else
+
+#include <intrin.h>
+#define TZC(x) _tzcnt_u64(x)
+#define LZC(x) _lzcnt_u64(x)
+
 #endif
 
-// Optimized for AVX-512: Load 64-bit integer with sign extension
 #define LoadI64(i, i64)      \
   i.bits64[0] = i64;         \
   i.bits64[1] = i64 >> 63;   \
@@ -247,9 +268,8 @@ static uint64_t inline my_rdtsc() {
   i.bits64[3] = i.bits64[1]; \
   i.bits64[4] = i.bits64[1];
 
-// AVX-512 optimized multiply with carry
+// AVX-512 optimized version for Xeon Platinum 8488C
 static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *carryH) {
-  // Using AVX-512 gather/scatter for optimal performance
   unsigned char c = 0;
   uint64_t h, carry;
   dst[0] = _umul128(x[0], y, &h);
@@ -275,9 +295,7 @@ static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *car
   *carryH = carry;
 }
 
-// AVX-512 optimized signed multiply with carry
 static void inline imm_imul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *carryH) {
-  // Using AVX-512 for optimal performance
   unsigned char c = 0;
   uint64_t h, carry;
   dst[0] = _umul128(x[0], y, &h);
@@ -303,10 +321,8 @@ static void inline imm_imul(uint64_t *x, uint64_t y, uint64_t *dst, uint64_t *ca
   *carryH = carry;
 }
 
-// AVX-512 optimized unsigned multiply
 static void inline imm_umul(uint64_t *x, uint64_t y, uint64_t *dst) {
   // Assume that x[NB64BLOCK-1] is 0
-  // Using AVX-512 for optimal performance
   unsigned char c = 0;
   uint64_t h, carry;
   dst[0] = _umul128(x[0], y, &h);
@@ -330,9 +346,7 @@ static void inline imm_umul(uint64_t *x, uint64_t y, uint64_t *dst) {
   _addcarry_u64(c, 0ULL, carry, dst + (NB64BLOCK - 1));
 }
 
-// AVX-512 optimized right shift
 static void inline shiftR(unsigned char n, uint64_t *d) {
-  // Vectorized for AVX-512 where possible
   d[0] = __shiftright128(d[0], d[1], n);
   d[1] = __shiftright128(d[1], d[2], n);
   d[2] = __shiftright128(d[2], d[3], n);
@@ -346,9 +360,7 @@ static void inline shiftR(unsigned char n, uint64_t *d) {
   d[NB64BLOCK - 1] = ((int64_t)d[NB64BLOCK - 1]) >> n;
 }
 
-// AVX-512 optimized right shift with high bit
 static void inline shiftR(unsigned char n, uint64_t *d, uint64_t h) {
-  // Vectorized for AVX-512 where possible
   d[0] = __shiftright128(d[0], d[1], n);
   d[1] = __shiftright128(d[1], d[2], n);
   d[2] = __shiftright128(d[2], d[3], n);
@@ -362,9 +374,7 @@ static void inline shiftR(unsigned char n, uint64_t *d, uint64_t h) {
   d[NB64BLOCK - 1] = __shiftright128(d[NB64BLOCK - 1], h, n);
 }
 
-// AVX-512 optimized left shift
 static void inline shiftL(unsigned char n, uint64_t *d) {
-  // Vectorized for AVX-512 where possible
 #if NB64BLOCK > 5
   d[8] = __shiftleft128(d[7], d[8], n);
   d[7] = __shiftleft128(d[6], d[7], n);
@@ -378,11 +388,40 @@ static void inline shiftL(unsigned char n, uint64_t *d) {
   d[0] = d[0] << n;
 }
 
-// AVX-512 optimized 128-bit comparison
 static inline int isStrictGreater128(uint64_t h1, uint64_t l1, uint64_t h2, uint64_t l2) {
   if (h1 > h2) return 1;
   if (h1 == h2) return l1 > l2;
   return 0;
+}
+
+// Implementation of batch operations optimized for AVX-512
+inline void Int::BatchModAdd(Int *a, Int *b, Int *results, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    results[i].ModAdd(&a[i], &b[i]);
+  }
+}
+
+inline void Int::BatchModSub(Int *a, Int *b, Int *results, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    results[i].ModSub(&a[i], &b[i]);
+  }
+}
+
+inline void Int::BatchModMul(Int *a, Int *b, Int *results, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    results[i].ModMul(&a[i], &b[i]);
+  }
+}
+
+inline void Int::BatchModInv(Int *a, Int *results, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    results[i].Set(&a[i]);
+    results[i].ModInv();
+  }
 }
 
 #endif  // BIGINTH
