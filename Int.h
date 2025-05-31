@@ -159,10 +159,10 @@ class Int {
   static bool CheckInv(Int *a);
 
   // Static field values
-  static alignas(64) Int P;  // Aligned for AVX-512
+  static Int alignas(64) P;  // Aligned for AVX-512
 
   // Data storage - aligned for optimal AVX-512 performance
-  alignas(64) union {
+  union alignas(64) {
     uint32_t bits[NB32BLOCK];
     uint64_t bits64[NB64BLOCK];
   };
