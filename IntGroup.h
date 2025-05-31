@@ -1,24 +1,35 @@
 #ifndef INTGROUPH
 #define INTGROUPH
 
-#include "Int.h"
+#include <immintrin.h>  // For AVX-512 intrinsics
+
 #include <vector>
 
-class IntGroup {
+#include "Int.h"
 
-public:
+// Optimized for AVX-512 on Intel Xeon Platinum 8488C
+class alignas(64) IntGroup {
+ public:
+  // Constructor with proper alignment for AVX-512
+  IntGroup(int size);
+  ~IntGroup();
 
-	IntGroup(int size);
-	~IntGroup();
-	void Set(Int *pts);
-	void ModInv();
+  // AVX-512 optimized batch operations
+  void Set(Int *pts);
+  void ModInv();
 
-private:
+  // Additional AVX-512 optimized batch methods
+  void BatchModMul(Int *a, Int *b, Int *result, int count);
+  void BatchModAdd(Int *a, Int *b, Int *result, int count);
+  void BatchModSub(Int *a, Int *b, Int *result, int count);
 
-	Int *ints;
-  Int *subp;
+ private:
+  Int *ints;
+  alignas(64) Int *subp;  // Aligned for AVX-512
   int size;
 
+  // Helper methods for AVX-512 optimization
+  void AlignedModInv();
 };
 
-#endif // INTGROUPH
+#endif  // INTGROUPH
