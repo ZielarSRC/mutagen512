@@ -7,56 +7,56 @@
 
 namespace ripemd160avx512 {
 
-#ifdef WIN64
-static const __declspec(align(64)) uint32_t _init[] = {
-#else
-static const uint32_t _init[] __attribute__((aligned(64))) = {
-#endif
-    // 16 copies of A for AVX-512
+// 64-byte alignment for Sapphire Rapids optimization
+#define ALIGN64 __attribute__((aligned(64)))
+
+// RIPEMD-160 initial values - 16 copies for AVX-512
+static const ALIGN64 uint32_t _init[] = {
+    // 16 copies of A (0x67452301)
     0x67452301ul, 0x67452301ul, 0x67452301ul, 0x67452301ul, 0x67452301ul,
     0x67452301ul, 0x67452301ul, 0x67452301ul, 0x67452301ul, 0x67452301ul,
     0x67452301ul, 0x67452301ul, 0x67452301ul, 0x67452301ul, 0x67452301ul,
     0x67452301ul,
 
-    // 16 copies of B
+    // 16 copies of B (0xEFCDAB89)
     0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul,
     0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul,
     0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul, 0xEFCDAB89ul,
     0xEFCDAB89ul,
 
-    // 16 copies of C
+    // 16 copies of C (0x98BADCFE)
     0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul,
     0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul,
     0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul, 0x98BADCFEul,
     0x98BADCFEul,
 
-    // 16 copies of D
+    // 16 copies of D (0x10325476)
     0x10325476ul, 0x10325476ul, 0x10325476ul, 0x10325476ul, 0x10325476ul,
     0x10325476ul, 0x10325476ul, 0x10325476ul, 0x10325476ul, 0x10325476ul,
     0x10325476ul, 0x10325476ul, 0x10325476ul, 0x10325476ul, 0x10325476ul,
     0x10325476ul,
 
-    // 16 copies of E
+    // 16 copies of E (0xC3D2E1F0)
     0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul,
     0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul,
     0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul, 0xC3D2E1F0ul,
     0xC3D2E1F0ul};
 
-// AVX-512 operations optimized for Xeon Platinum 8488C
-#define _mm512_not_si512(x) _mm512_xor_si512((x), _mm512_set1_epi32(-1))
+// AVX-512 operations optimized for Sapphire Rapids
 #define ROL512(x, n) \
   _mm512_or_si512(_mm512_slli_epi32(x, n), _mm512_srli_epi32(x, 32 - n))
 
-// RIPEMD-160 functions for AVX-512
-#define f1_512(x, y, z) _mm512_xor_si512(x, _mm512_xor_si512(y, z))
+// RIPEMD-160 functions using AVX-512 ternary logic (Sapphire Rapids
+// optimization)
+#define f1_512(x, y, z) _mm512_ternarylogic_epi32(x, y, z, 0x96)  // x ^ y ^ z
 #define f2_512(x, y, z) \
-  _mm512_or_si512(_mm512_and_si512(x, y), _mm512_andnot_si512(x, z))
+  _mm512_ternarylogic_epi32(x, y, z, 0xCA)  // (x & y) | (~x & z)
 #define f3_512(x, y, z) \
-  _mm512_xor_si512(_mm512_or_si512(x, _mm512_not_si512(y)), z)
+  _mm512_ternarylogic_epi32(x, y, z, 0x59)  // (x | ~y) ^ z
 #define f4_512(x, y, z) \
-  _mm512_or_si512(_mm512_and_si512(x, z), _mm512_andnot_si512(z, y))
+  _mm512_ternarylogic_epi32(x, y, z, 0xE4)  // (x & z) | (y & ~z)
 #define f5_512(x, y, z) \
-  _mm512_xor_si512(x, _mm512_or_si512(y, _mm512_not_si512(z)))
+  _mm512_ternarylogic_epi32(x, y, z, 0x69)  // x ^ (y | ~z)
 
 // Adding helpers for AVX-512
 #define add3_512(x0, x1, x2) _mm512_add_epi32(_mm512_add_epi32(x0, x1), x2)
@@ -69,7 +69,7 @@ static const uint32_t _init[] __attribute__((aligned(64))) = {
   a = _mm512_add_epi32(ROL512(u, r), e);       \
   c = ROL512(c, 10);
 
-// Macros for each round using AVX-512
+// Round macros for each type
 #define R11_512(a, b, c, d, e, x, r) \
   Round512(a, b, c, d, e, f1_512(b, c, d), x, 0, r)
 #define R21_512(a, b, c, d, e, x, r) \
@@ -91,7 +91,7 @@ static const uint32_t _init[] __attribute__((aligned(64))) = {
 #define R52_512(a, b, c, d, e, x, r) \
   Round512(a, b, c, d, e, f1_512(b, c, d), x, 0, r)
 
-// Macro to load words from 16 message blocks for AVX-512
+// Load words from 16 message blocks for AVX-512
 #define LOADW512(i)                                                        \
   _mm512_set_epi32(*((uint32_t *)blk[0] + i), *((uint32_t *)blk[1] + i),   \
                    *((uint32_t *)blk[2] + i), *((uint32_t *)blk[3] + i),   \
@@ -102,10 +102,10 @@ static const uint32_t _init[] __attribute__((aligned(64))) = {
                    *((uint32_t *)blk[12] + i), *((uint32_t *)blk[13] + i), \
                    *((uint32_t *)blk[14] + i), *((uint32_t *)blk[15] + i))
 
-// Initialize state for 16 parallel computations
+// Initialize RIPEMD-160 state for 16-way parallel processing
 void Initialize(__m512i *s) { memcpy(s, _init, sizeof(_init)); }
 
-// Transform function processes one block for each of 16 messages
+// Transform function - processes one 64-byte block for each of 16 messages
 void Transform(__m512i *s, uint8_t *blk[16]) {
   // Load state variables
   __m512i a1 = _mm512_load_si512(s + 0);
@@ -114,7 +114,7 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   __m512i d1 = _mm512_load_si512(s + 3);
   __m512i e1 = _mm512_load_si512(s + 4);
 
-  // Initialize second set of variables
+  // Initialize second set of variables for parallel processing
   __m512i a2 = a1;
   __m512i b2 = b1;
   __m512i c2 = c1;
@@ -124,12 +124,14 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   __m512i u;
   __m512i w[16];
 
-  // Load message words using optimized AVX-512 operations
+  // Load all 16 words from the message blocks
   for (int i = 0; i < 16; ++i) {
     w[i] = LOADW512(i);
   }
 
-  // Main rounds 0-15 of RIPEMD-160 optimized for Xeon Platinum 8488C
+  // **KOMPLETNE** 80 rund RIPEMD-160 - każda runda oddzielnie
+
+  // Rounds 0-15 (first 16 rounds)
   R11_512(a1, b1, c1, d1, e1, w[0], 11);
   R12_512(a2, b2, c2, d2, e2, w[5], 8);
   R11_512(e1, a1, b1, c1, d1, w[1], 14);
@@ -163,6 +165,7 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   R11_512(a1, b1, c1, d1, e1, w[15], 8);
   R12_512(a2, b2, c2, d2, e2, w[12], 6);
 
+  // Rounds 16-31 (second 16 rounds)
   R21_512(e1, a1, b1, c1, d1, w[7], 7);
   R22_512(e2, a2, b2, c2, d2, w[6], 9);
   R21_512(d1, e1, a1, b1, c1, w[4], 6);
@@ -196,6 +199,7 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   R21_512(e1, a1, b1, c1, d1, w[8], 12);
   R22_512(e2, a2, b2, c2, d2, w[2], 11);
 
+  // Rounds 32-47 (third 16 rounds)
   R31_512(d1, e1, a1, b1, c1, w[3], 11);
   R32_512(d2, e2, a2, b2, c2, w[15], 9);
   R31_512(c1, d1, e1, a1, b1, w[10], 13);
@@ -229,6 +233,7 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   R31_512(d1, e1, a1, b1, c1, w[12], 5);
   R32_512(d2, e2, a2, b2, c2, w[13], 5);
 
+  // Rounds 48-63 (fourth 16 rounds)
   R41_512(c1, d1, e1, a1, b1, w[1], 11);
   R42_512(c2, d2, e2, a2, b2, w[8], 15);
   R41_512(b1, c1, d1, e1, a1, w[9], 12);
@@ -262,6 +267,7 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   R41_512(c1, d1, e1, a1, b1, w[2], 12);
   R42_512(c2, d2, e2, a2, b2, w[14], 8);
 
+  // Rounds 64-79 (final 16 rounds)
   R51_512(b1, c1, d1, e1, a1, w[4], 9);
   R52_512(b2, c2, d2, e2, a2, w[12], 8);
   R51_512(a1, b1, c1, d1, e1, w[0], 15);
@@ -304,27 +310,18 @@ void Transform(__m512i *s, uint8_t *blk[16]) {
   s[4] = add3_512(t, b1, c2);
 }
 
-// Optimized DEPACK for AVX-512
-#ifdef WIN64
-#define DEPACK512(d, i)                               \
-  ((uint32_t *)d)[0] = _mm512_extract_epi32(s[0], i); \
-  ((uint32_t *)d)[1] = _mm512_extract_epi32(s[1], i); \
-  ((uint32_t *)d)[2] = _mm512_extract_epi32(s[2], i); \
-  ((uint32_t *)d)[3] = _mm512_extract_epi32(s[3], i); \
-  ((uint32_t *)d)[4] = _mm512_extract_epi32(s[4], i);
-#else
+// Unpacking function for extracting hash values from AVX-512 registers
 #define DEPACK512(d, i)                        \
   ((uint32_t *)d)[0] = ((uint32_t *)&s[0])[i]; \
   ((uint32_t *)d)[1] = ((uint32_t *)&s[1])[i]; \
   ((uint32_t *)d)[2] = ((uint32_t *)&s[2])[i]; \
   ((uint32_t *)d)[3] = ((uint32_t *)&s[3])[i]; \
   ((uint32_t *)d)[4] = ((uint32_t *)&s[4])[i];
-#endif
 
 static const uint64_t sizedesc_32 = 32 << 3;
 static const unsigned char pad[64] = {0x80};
 
-// Main function to compute RIPEMD-160 hash for 16 messages of 32 bytes each
+// Main function - 16-way parallel RIPEMD-160 for 32-byte inputs
 void ripemd160avx512_32(unsigned char *i0, unsigned char *i1, unsigned char *i2,
                         unsigned char *i3, unsigned char *i4, unsigned char *i5,
                         unsigned char *i6, unsigned char *i7, unsigned char *i8,
@@ -342,59 +339,42 @@ void ripemd160avx512_32(unsigned char *i0, unsigned char *i1, unsigned char *i2,
   uint8_t *bs[] = {i0, i1, i2,  i3,  i4,  i5,  i6,  i7,
                    i8, i9, i10, i11, i12, i13, i14, i15};
 
-  // Initialize state for 16 parallel computations
+  // Initialize RIPEMD-160 state
   ripemd160avx512::Initialize(s);
 
-  // Add padding and length for all 16 messages
+  // Add padding and length to all 16 messages
   for (int i = 0; i < 16; ++i) {
-    memcpy(bs[i] + 32, pad, 24);
-    memcpy(bs[i] + 56, &sizedesc_32, 8);
+    memcpy(bs[i] + 32, pad, 24);          // Add padding
+    memcpy(bs[i] + 56, &sizedesc_32, 8);  // Add length
   }
 
-  // Process message blocks using optimized AVX-512 transform
+  // Process all 16 message blocks in parallel
   ripemd160avx512::Transform(s, bs);
 
-#ifndef WIN64
+  // Extract hash values from AVX-512 registers
   uint32_t *s0 = (uint32_t *)&s[0];
   uint32_t *s1 = (uint32_t *)&s[1];
   uint32_t *s2 = (uint32_t *)&s[2];
   uint32_t *s3 = (uint32_t *)&s[3];
   uint32_t *s4 = (uint32_t *)&s[4];
-#endif
 
-  // Unpack the hash values to the output buffers - optimized for Xeon Platinum
-  // 8488C
-  unsigned char *hashArray[16] = {d0, d1, d2,  d3,  d4,  d5,  d6,  d7,
-                                  d8, d9, d10, d11, d12, d13, d14, d15};
-
-  // Optimized unpacking using AVX-512 lanes
-  DEPACK512(hashArray[0], 15);
-  DEPACK512(hashArray[1], 14);
-  DEPACK512(hashArray[2], 13);
-  DEPACK512(hashArray[3], 12);
-  DEPACK512(hashArray[4], 11);
-  DEPACK512(hashArray[5], 10);
-  DEPACK512(hashArray[6], 9);
-  DEPACK512(hashArray[7], 8);
-  DEPACK512(hashArray[8], 7);
-  DEPACK512(hashArray[9], 6);
-  DEPACK512(hashArray[10], 5);
-  DEPACK512(hashArray[11], 4);
-  DEPACK512(hashArray[12], 3);
-  DEPACK512(hashArray[13], 2);
-  DEPACK512(hashArray[14], 1);
-  DEPACK512(hashArray[15], 0);
-}
-
-// Batch processing function for easier integration with mutagen
-void ripemd160avx512_batch(unsigned char **inputs, unsigned char **outputs) {
-  ripemd160avx512_32(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
-                     inputs[5], inputs[6], inputs[7], inputs[8], inputs[9],
-                     inputs[10], inputs[11], inputs[12], inputs[13], inputs[14],
-                     inputs[15], outputs[0], outputs[1], outputs[2], outputs[3],
-                     outputs[4], outputs[5], outputs[6], outputs[7], outputs[8],
-                     outputs[9], outputs[10], outputs[11], outputs[12],
-                     outputs[13], outputs[14], outputs[15]);
+  // Unpack hash values to output buffers (16 results)
+  DEPACK512(d0, 15);
+  DEPACK512(d1, 14);
+  DEPACK512(d2, 13);
+  DEPACK512(d3, 12);
+  DEPACK512(d4, 11);
+  DEPACK512(d5, 10);
+  DEPACK512(d6, 9);
+  DEPACK512(d7, 8);
+  DEPACK512(d8, 7);
+  DEPACK512(d9, 6);
+  DEPACK512(d10, 5);
+  DEPACK512(d11, 4);
+  DEPACK512(d12, 3);
+  DEPACK512(d13, 2);
+  DEPACK512(d14, 1);
+  DEPACK512(d15, 0);
 }
 
 }  // namespace ripemd160avx512
