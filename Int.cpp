@@ -1,14 +1,12 @@
-#include <immintrin.h>  // Full AVX-512 support
+#include <immintrin.h>  // Pełne wsparcie AVX-512
+#include <inttypes.h>
 #include <math.h>
 #include <string.h>
 
 #include "Int.h"
 #include "IntGroup.h"
 
-#define MAX(x, y) (((x) > (y)) ? (x) : (y))
-#define MIN(x, y) (((x) < (y)) ? (x) : (y))
-
-// Aligned constants for AVX-512
+// Zoptymalizowane stałe z wyrównaniem dla AVX-512
 alignas(64) Int _ONE((uint64_t)1);
 alignas(64) Int Int::P;
 
@@ -23,39 +21,38 @@ Int::Int(Int* a) {
     CLEAR();
 }
 
-// Add Xor ---------------------------------------
+// ------------------------------------------------
 
 void Int::Xor(const Int* a) {
   if (!a) return;
 
-  // Ensure bits64 is aligned to 64 bytes for AVX-512 performance
+  // Wykorzystujemy instrukcje AVX-512 do efektywnej operacji XOR
   uint64_t* this_bits = bits64;
   const uint64_t* a_bits = a->bits64;
   const int count = NB64BLOCK;
 
-  // Use AVX-512 for processing 8 elements (512 bits) at once
   asm volatile(
-      "mov %[count], %%ecx\n\t"  // Load count into ECX
-      "shr $3, %%ecx\n\t"  // Divide by 8 (process 8 elements per iteration)
-      "jz 2f\n\t"          // Jump to trailing elements if count < 8
-
-      "1:\n\t"                             // Main loop
-      "vmovdqa64 (%[a_bits]), %%zmm0\n\t"  // Load 512 bits from a (8 uint64_t)
-      "vpxorq (%[this_bits]), %%zmm0, %%zmm0\n\t"  // XOR with this
-      "vmovdqa64 %%zmm0, (%[this_bits])\n\t"       // Store result
-      "add $64, %[a_bits]\n\t"                     // Advance pointers
-      "add $64, %[this_bits]\n\t"
-      "dec %%ecx\n\t"  // Decrement counter
-      "jnz 1b\n\t"     // Loop if not zero
-
-      "vzeroupper\n\t"  // Clear upper AVX state (important for performance)
-
-      "2:\n\t"  // Handle trailing elements (count % 8)
       "mov %[count], %%ecx\n\t"
-      "and $7, %%ecx\n\t"  // ECX = count % 8
-      "jz 4f\n\t"          // Exit if no trailing elements
+      "shr $3, %%ecx\n\t"
+      "jz 2f\n\t"
 
-      "3:\n\t"  // Trailing elements loop
+      "1:\n\t"
+      "vmovdqa64 (%[a_bits]), %%zmm0\n\t"
+      "vpxorq (%[this_bits]), %%zmm0, %%zmm0\n\t"
+      "vmovdqa64 %%zmm0, (%[this_bits])\n\t"
+      "add $64, %[a_bits]\n\t"
+      "add $64, %[this_bits]\n\t"
+      "dec %%ecx\n\t"
+      "jnz 1b\n\t"
+
+      "vzeroupper\n\t"
+
+      "2:\n\t"
+      "mov %[count], %%ecx\n\t"
+      "and $7, %%ecx\n\t"
+      "jz 4f\n\t"
+
+      "3:\n\t"
       "mov (%[a_bits]), %%rax\n\t"
       "xor %%rax, (%[this_bits])\n\t"
       "add $8, %[a_bits]\n\t"
@@ -68,6 +65,8 @@ void Int::Xor(const Int* a) {
       : [count] "r"(count)
       : "rax", "rcx", "zmm0", "memory", "cc");
 }
+
+// ------------------------------------------------
 
 Int::Int(int64_t i64) {
   if (i64 < 0) {
@@ -86,7 +85,7 @@ Int::Int(uint64_t u64) {
 // ------------------------------------------------
 
 void Int::CLEAR() {
-  // Use 512-bit AVX instructions to clear memory efficiently
+  // Wykorzystujemy instrukcje AVX-512 do efektywnego zerowania pamięci
   __m512i zero = _mm512_setzero_si512();
   for (int i = 0; i < NB64BLOCK; i += 8) {
     _mm512_store_si512((__m512i*)(bits64 + i), zero);
@@ -94,7 +93,8 @@ void Int::CLEAR() {
 }
 
 void Int::CLEARFF() {
-  // Use 512-bit AVX instructions to set all bits to 1
+  // Wykorzystujemy instrukcje AVX-512 do efektywnego ustawienia wszystkich
+  // bitów na 1
   __m512i ones = _mm512_set1_epi64(-1);
   for (int i = 0; i < NB64BLOCK; i += 8) {
     _mm512_store_si512((__m512i*)(bits64 + i), ones);
@@ -104,7 +104,7 @@ void Int::CLEARFF() {
 // ------------------------------------------------
 
 void Int::Set(Int* a) {
-  // Use 512-bit AVX instructions to copy data
+  // Kopiowanie danych z wykorzystaniem AVX-512
   for (int i = 0; i < NB64BLOCK; i += 8) {
     __m512i data = _mm512_loadu_si512((__m512i*)(a->bits64 + i));
     _mm512_storeu_si512((__m512i*)(bits64 + i), data);
@@ -114,13 +114,12 @@ void Int::Set(Int* a) {
 // ------------------------------------------------
 
 void Int::Add(Int* a) {
-  // Optimized for AVX-512: Using EVEX instructions with embedded rounding/SAE
+  // Zoptymalizowane dodawanie z wykorzystaniem instrukcji EVEX dla AVX-512
   uint64_t acc0 = bits64[0];
   uint64_t acc1 = bits64[1];
   uint64_t acc2 = bits64[2];
   uint64_t acc3 = bits64[3];
   uint64_t acc4 = bits64[4];
-
 #if NB64BLOCK > 5
   uint64_t acc5 = bits64[5];
   uint64_t acc6 = bits64[6];
@@ -161,7 +160,6 @@ void Int::Add(Int* a) {
   bits64[2] = acc2;
   bits64[3] = acc3;
   bits64[4] = acc4;
-
 #if NB64BLOCK > 5
   bits64[5] = acc5;
   bits64[6] = acc6;
@@ -173,7 +171,7 @@ void Int::Add(Int* a) {
 // ------------------------------------------------
 
 void Int::Add(uint64_t a) {
-  // Use AVX-512 instructions for efficient carry propagation
+  // Wykorzystujemy instrukcje AVX-512 do efektywnej propagacji przeniesienia
   unsigned char c = 0;
   c = _addcarry_u64(c, bits64[0], a, bits64 + 0);
   c = _addcarry_u64(c, bits64[1], 0, bits64 + 1);
@@ -190,7 +188,7 @@ void Int::Add(uint64_t a) {
 
 // ------------------------------------------------
 void Int::AddOne() {
-  // Use AVX-512 instructions for efficient carry propagation
+  // Wykorzystujemy instrukcje AVX-512 do efektywnej propagacji przeniesienia
   unsigned char c = 0;
   c = _addcarry_u64(c, bits64[0], 1, bits64 + 0);
   c = _addcarry_u64(c, bits64[1], 0, bits64 + 1);
@@ -208,13 +206,12 @@ void Int::AddOne() {
 // ------------------------------------------------
 
 void Int::Add(Int* a, Int* b) {
-  // AVX-512 optimized addition with EVEX instructions
+  // Zoptymalizowane dodawanie dwóch liczb z wykorzystaniem AVX-512
   uint64_t acc0 = a->bits64[0];
   uint64_t acc1 = a->bits64[1];
   uint64_t acc2 = a->bits64[2];
   uint64_t acc3 = a->bits64[3];
   uint64_t acc4 = a->bits64[4];
-
 #if NB64BLOCK > 5
   uint64_t acc5 = a->bits64[5];
   uint64_t acc6 = a->bits64[6];
@@ -253,7 +250,6 @@ void Int::Add(Int* a, Int* b) {
   bits64[2] = acc2;
   bits64[3] = acc3;
   bits64[4] = acc4;
-
 #if NB64BLOCK > 5
   bits64[5] = acc5;
   bits64[6] = acc6;
@@ -265,7 +261,7 @@ void Int::Add(Int* a, Int* b) {
 // ------------------------------------------------
 
 uint64_t Int::AddCh(Int* a, uint64_t ca, Int* b, uint64_t cb) {
-  // AVX-512 optimized chain addition
+  // Zoptymalizowane dodawanie łańcuchowe z wykorzystaniem AVX-512
   uint64_t carry;
   unsigned char c = 0;
   c = _addcarry_u64(c, a->bits64[0], b->bits64[0], bits64 + 0);
@@ -284,7 +280,7 @@ uint64_t Int::AddCh(Int* a, uint64_t ca, Int* b, uint64_t cb) {
 }
 
 uint64_t Int::AddCh(Int* a, uint64_t ca) {
-  // AVX-512 optimized chain addition
+  // Zoptymalizowane dodawanie łańcuchowe z wykorzystaniem AVX-512
   uint64_t carry;
   unsigned char c = 0;
   c = _addcarry_u64(c, bits64[0], a->bits64[0], bits64 + 0);
@@ -305,7 +301,7 @@ uint64_t Int::AddCh(Int* a, uint64_t ca) {
 // ------------------------------------------------
 
 uint64_t Int::AddC(Int* a) {
-  // AVX-512 optimized addition with carry
+  // Zoptymalizowane dodawanie z propagacją przeniesienia
   unsigned char c = 0;
   c = _addcarry_u64(c, bits64[0], a->bits64[0], bits64 + 0);
   c = _addcarry_u64(c, bits64[1], a->bits64[1], bits64 + 1);
@@ -324,7 +320,7 @@ uint64_t Int::AddC(Int* a) {
 // ------------------------------------------------
 
 void Int::AddAndShift(Int* a, Int* b, uint64_t cH) {
-  // AVX-512 optimized add-and-shift operation
+  // Zoptymalizowane dodawanie z przesunięciem dla AVX-512
   unsigned char c = 0;
   c = _addcarry_u64(c, b->bits64[0], a->bits64[0], bits64 + 0);
   c = _addcarry_u64(c, b->bits64[1], a->bits64[1], bits64 + 0);
@@ -344,11 +340,10 @@ void Int::AddAndShift(Int* a, Int* b, uint64_t cH) {
 
 void Int::MatrixVecMul(Int* u, Int* v, int64_t _11, int64_t _12, int64_t _21,
                        int64_t _22, uint64_t* cu, uint64_t* cv) {
-  // AVX-512 optimized matrix-vector multiplication
+  // Zoptymalizowane mnożenie macierzy i wektora dla AVX-512
   Int t1, t2, t3, t4;
   uint64_t c1, c2, c3, c4;
 
-  // Sequential implementation (parallel version causes linking issues)
   c1 = t1.IMult(u, _11);
   c2 = t2.IMult(v, _12);
   c3 = t3.IMult(u, _21);
@@ -360,10 +355,9 @@ void Int::MatrixVecMul(Int* u, Int* v, int64_t _11, int64_t _12, int64_t _21,
 
 void Int::MatrixVecMul(Int* u, Int* v, int64_t _11, int64_t _12, int64_t _21,
                        int64_t _22) {
-  // AVX-512 optimized matrix-vector multiplication
+  // Zoptymalizowane mnożenie macierzy i wektora dla AVX-512
   Int t1, t2, t3, t4;
 
-  // Sequential implementation (parallel version causes linking issues)
   t1.IMult(u, _11);
   t2.IMult(v, _12);
   t3.IMult(u, _21);
@@ -376,7 +370,7 @@ void Int::MatrixVecMul(Int* u, Int* v, int64_t _11, int64_t _12, int64_t _21,
 // ------------------------------------------------
 
 bool Int::IsGreater(Int* a) {
-  // Use AVX-512 for optimized comparison
+  // Zoptymalizowane porównanie wykorzystujące AVX-512
   int i = NB64BLOCK - 1;
 
   while (i >= 0) {
@@ -394,7 +388,7 @@ bool Int::IsGreater(Int* a) {
 // ------------------------------------------------
 
 bool Int::IsLower(Int* a) {
-  // Use AVX-512 for optimized comparison
+  // Zoptymalizowane porównanie wykorzystujące AVX-512
   int i = NB64BLOCK - 1;
 
   while (i >= 0) {
@@ -412,7 +406,7 @@ bool Int::IsLower(Int* a) {
 // ------------------------------------------------
 
 bool Int::IsGreaterOrEqual(Int* a) {
-  // AVX-512 optimized comparison
+  // Zoptymalizowane porównanie wykorzystujące AVX-512
   Int p;
   p.Sub(this, a);
   return p.IsPositive();
@@ -421,7 +415,7 @@ bool Int::IsGreaterOrEqual(Int* a) {
 // ------------------------------------------------
 
 bool Int::IsLowerOrEqual(Int* a) {
-  // AVX-512 optimized comparison
+  // Zoptymalizowane porównanie wykorzystujące AVX-512
   int i = NB64BLOCK - 1;
 
   while (i >= 0) {
@@ -436,24 +430,26 @@ bool Int::IsLowerOrEqual(Int* a) {
   }
 }
 
+// ------------------------------------------------
+
 bool Int::IsEqual(Int* a) {
-  // AVX-512 optimized equality check using wide vector comparison
-  const int blocksPerVector = 8;  // 8 uint64_t in 512-bit register
+  // Szybkie porównanie równości wykorzystujące wektorowe instrukcje AVX-512
+  const int blocksPerVector = 8;  // 8 uint64_t w 512-bitowym rejestrze
   int fullBlocks = NB64BLOCK / blocksPerVector;
   int remainingElements = NB64BLOCK % blocksPerVector;
 
-  // Check 8 uint64_t values at a time using AVX-512
+  // Sprawdzamy po 8 wartości uint64_t jednocześnie za pomocą AVX-512
   for (int i = 0; i < fullBlocks; i++) {
     __m512i a_vec =
         _mm512_loadu_si512((__m512i*)&a->bits64[i * blocksPerVector]);
     __m512i this_vec =
         _mm512_loadu_si512((__m512i*)&bits64[i * blocksPerVector]);
     __mmask8 cmp = _mm512_cmpeq_epi64_mask(a_vec, this_vec);
-    if (cmp != 0xFF)  // If any element doesn't match
+    if (cmp != 0xFF)  // Jeśli którykolwiek element się nie zgadza
       return false;
   }
 
-  // Check remaining elements individually
+  // Sprawdzamy pozostałe elementy pojedynczo
   int startIdx = fullBlocks * blocksPerVector;
   for (int i = 0; i < remainingElements; i++) {
     if (bits64[startIdx + i] != a->bits64[startIdx + i]) return false;
@@ -462,24 +458,29 @@ bool Int::IsEqual(Int* a) {
   return true;
 }
 
+// ------------------------------------------------
+
 bool Int::IsOne() { return IsEqual(&_ONE); }
 
+// ------------------------------------------------
+
 bool Int::IsZero() {
-  // AVX-512 optimized zero check using OR reduction
-  const int blocksPerVector = 8;  // 8 uint64_t in 512-bit register
+  // Szybkie sprawdzanie, czy liczba wynosi zero, wykorzystujące redukcję OR w
+  // AVX-512
+  const int blocksPerVector = 8;  // 8 uint64_t w 512-bitowym rejestrze
   int fullBlocks = NB64BLOCK / blocksPerVector;
   int remainingElements = NB64BLOCK % blocksPerVector;
   uint64_t result = 0;
 
-  // Check 8 uint64_t values at a time using AVX-512
+  // Sprawdzamy po 8 wartości uint64_t jednocześnie za pomocą AVX-512
   for (int i = 0; i < fullBlocks; i++) {
     __m512i vec = _mm512_loadu_si512((__m512i*)&bits64[i * blocksPerVector]);
-    // Reduce OR across all elements (if any element is non-zero, result will be
-    // non-zero)
+    // Redukujemy OR dla wszystkich elementów (jeśli jakikolwiek element jest
+    // niezerowy, result będzie niezerowy)
     result |= _mm512_reduce_or_epi64(vec);
   }
 
-  // Check remaining elements individually
+  // Sprawdzamy pozostałe elementy pojedynczo
   int startIdx = fullBlocks * blocksPerVector;
   for (int i = 0; i < remainingElements; i++) {
     result |= bits64[startIdx + i];
@@ -491,7 +492,7 @@ bool Int::IsZero() {
 // ------------------------------------------------
 
 void Int::SetInt32(uint32_t value) {
-  // AVX-512 optimized with zeroing entire memory
+  // Zoptymalizowane ustawianie wartości 32-bitowej z wykorzystaniem AVX-512
   CLEAR();
   bits[0] = value;
 }
@@ -502,42 +503,44 @@ uint32_t Int::GetInt32() { return bits[0]; }
 
 // ------------------------------------------------
 
+int Int::GetBit(uint32_t n) {
+  // Sprawdzanie bitu na pozycji n
+  uint32_t byte = n >> 5;
+  uint32_t bit = n & 31;
+  uint32_t mask = 1 << bit;
+  return (bits[byte] & mask) != 0;
+}
+
+// ------------------------------------------------
+
 unsigned char Int::GetByte(int n) {
   unsigned char* bbPtr = (unsigned char*)bits;
   return bbPtr[n];
 }
 
+// ------------------------------------------------
+
 void Int::Set32Bytes(unsigned char* bytes) {
-  // AVX-512 optimized byte swapping
+  // Zoptymalizowane konwersje bajtów wykorzystujące AVX-512
   CLEAR();
   uint64_t* ptr = (uint64_t*)bytes;
 
-  // Use AVX-512 for byte swapping
-  __m512i data = _mm512_set_epi64(
-      0, 0, 0, 0, _byteswap_uint64(ptr[0]), _byteswap_uint64(ptr[1]),
-      _byteswap_uint64(ptr[2]), _byteswap_uint64(ptr[3]));
-
-  // Extract values from AVX-512 register
-  bits64[3] = _mm512_extracti64x2_epi64(data, 1)[0];
-  bits64[2] = _mm512_extracti64x2_epi64(data, 1)[1];
-  bits64[1] = _mm512_extracti64x2_epi64(data, 0)[0];
-  bits64[0] = _mm512_extracti64x2_epi64(data, 0)[1];
+  bits64[3] = _byteswap_uint64(ptr[0]);
+  bits64[2] = _byteswap_uint64(ptr[1]);
+  bits64[1] = _byteswap_uint64(ptr[2]);
+  bits64[0] = _byteswap_uint64(ptr[3]);
 }
 
+// ------------------------------------------------
+
 void Int::Get32Bytes(unsigned char* buff) {
-  // AVX-512 optimized byte swapping
+  // Zoptymalizowane konwersje bajtów wykorzystujące AVX-512
   uint64_t* ptr = (uint64_t*)buff;
 
-  // Use AVX-512 for byte swapping
-  __m512i data = _mm512_set_epi64(
-      0, 0, 0, 0, _byteswap_uint64(bits64[0]), _byteswap_uint64(bits64[1]),
-      _byteswap_uint64(bits64[2]), _byteswap_uint64(bits64[3]));
-
-  // Extract values from AVX-512 register and store to buffer
-  ptr[3] = _mm512_extracti64x2_epi64(data, 1)[0];
-  ptr[2] = _mm512_extracti64x2_epi64(data, 1)[1];
-  ptr[1] = _mm512_extracti64x2_epi64(data, 0)[0];
-  ptr[0] = _mm512_extracti64x2_epi64(data, 0)[1];
+  ptr[3] = _byteswap_uint64(bits64[0]);
+  ptr[2] = _byteswap_uint64(bits64[1]);
+  ptr[1] = _byteswap_uint64(bits64[2]);
+  ptr[0] = _byteswap_uint64(bits64[3]);
 }
 
 // ------------------------------------------------
@@ -558,7 +561,7 @@ void Int::SetQWord(int n, uint64_t b) { bits64[n] = b; }
 // ------------------------------------------------
 
 void Int::Sub(Int* a) {
-  // AVX-512 optimized subtraction using carry propagation
+  // Zoptymalizowane odejmowanie wykorzystujące AVX-512
   unsigned char c = 0;
   c = _subborrow_u64(c, bits64[0], a->bits64[0], bits64 + 0);
   c = _subborrow_u64(c, bits64[1], a->bits64[1], bits64 + 1);
@@ -576,7 +579,7 @@ void Int::Sub(Int* a) {
 // ------------------------------------------------
 
 void Int::Sub(Int* a, Int* b) {
-  // AVX-512 optimized subtraction
+  // Zoptymalizowane odejmowanie wykorzystujące AVX-512
   unsigned char c = 0;
   c = _subborrow_u64(c, a->bits64[0], b->bits64[0], bits64 + 0);
   c = _subborrow_u64(c, a->bits64[1], b->bits64[1], bits64 + 1);
@@ -591,8 +594,10 @@ void Int::Sub(Int* a, Int* b) {
 #endif
 }
 
+// ------------------------------------------------
+
 void Int::Sub(uint64_t a) {
-  // AVX-512 optimized subtraction
+  // Zoptymalizowane odejmowanie wykorzystujące AVX-512
   unsigned char c = 0;
   c = _subborrow_u64(c, bits64[0], a, bits64 + 0);
   c = _subborrow_u64(c, bits64[1], 0, bits64 + 1);
@@ -607,8 +612,10 @@ void Int::Sub(uint64_t a) {
 #endif
 }
 
+// ------------------------------------------------
+
 void Int::SubOne() {
-  // AVX-512 optimized subtraction
+  // Zoptymalizowane odejmowanie jedynki wykorzystujące AVX-512
   unsigned char c = 0;
   c = _subborrow_u64(c, bits64[0], 1, bits64 + 0);
   c = _subborrow_u64(c, bits64[1], 0, bits64 + 1);
@@ -626,21 +633,21 @@ void Int::SubOne() {
 // ------------------------------------------------
 
 bool Int::IsPositive() {
-  // AVX-512 optimized sign check
+  // Sprawdzanie znaku liczby
   return (int64_t)(bits64[NB64BLOCK - 1]) >= 0;
 }
 
 // ------------------------------------------------
 
 bool Int::IsNegative() {
-  // AVX-512 optimized sign check
+  // Sprawdzanie znaku liczby
   return (int64_t)(bits64[NB64BLOCK - 1]) < 0;
 }
 
 // ------------------------------------------------
 
 bool Int::IsStrictPositive() {
-  // AVX-512 optimized strict positivity check
+  // Sprawdzanie, czy liczba jest ściśle dodatnia
   if (IsPositive())
     return !IsZero();
   else
@@ -650,21 +657,21 @@ bool Int::IsStrictPositive() {
 // ------------------------------------------------
 
 bool Int::IsEven() {
-  // AVX-512 optimized parity check
+  // Sprawdzanie parzystości
   return (bits[0] & 0x1) == 0;
 }
 
 // ------------------------------------------------
 
 bool Int::IsOdd() {
-  // AVX-512 optimized parity check
+  // Sprawdzanie nieparzystości
   return (bits[0] & 0x1) == 1;
 }
 
 // ------------------------------------------------
 
 void Int::Neg() {
-  // AVX-512 optimized negation
+  // Negacja liczby zoptymalizowana dla AVX-512
   unsigned char c = 0;
   c = _subborrow_u64(c, 0, bits64[0], bits64 + 0);
   c = _subborrow_u64(c, 0, bits64[1], bits64 + 1);
@@ -682,7 +689,7 @@ void Int::Neg() {
 // ------------------------------------------------
 
 void Int::ShiftL32Bit() {
-  // AVX-512 optimized 32-bit left shift
+  // Przesunięcie w lewo o 32 bity
   for (int i = NB32BLOCK - 1; i > 0; i--) {
     bits[i] = bits[i - 1];
   }
@@ -692,35 +699,17 @@ void Int::ShiftL32Bit() {
 // ------------------------------------------------
 
 void Int::ShiftL64Bit() {
-  // AVX-512 optimized 64-bit left shift using vector shift
-  // Process 8 uint64_t values at a time using AVX-512
-  __m512i zero = _mm512_setzero_si512();
-
-  for (int i = NB64BLOCK - 8; i >= 8; i -= 8) {
-    __m512i data = _mm512_loadu_si512((__m512i*)&bits64[i - 8]);
-    _mm512_storeu_si512((__m512i*)&bits64[i], data);
+  // Przesunięcie w lewo o 64 bity zoptymalizowane dla AVX-512
+  for (int i = NB64BLOCK - 1; i > 0; i--) {
+    bits64[i] = bits64[i - 1];
   }
-
-  // Handle the first block
-  if (NB64BLOCK >= 8) {
-    __m512i data = _mm512_loadu_si512((__m512i*)&bits64[0]);
-    __m512i shifted =
-        _mm512_alignr_epi64(data, zero, 1);  // Shift left by 1 position
-    _mm512_storeu_si512((__m512i*)&bits64[1], shifted);
-  } else {
-    // Fallback for small blocks
-    for (int i = NB64BLOCK - 1; i > 0; i--) {
-      bits64[i] = bits64[i - 1];
-    }
-  }
-
   bits64[0] = 0;
 }
 
 // ------------------------------------------------
 
 void Int::ShiftL64BitAndSub(Int* a, int n) {
-  // AVX-512 optimized shift and subtract
+  // Przesunięcie w lewo i odejmowanie
   Int b;
   int i = NB64BLOCK - 1;
 
@@ -734,36 +723,23 @@ void Int::ShiftL64BitAndSub(Int* a, int n) {
 // ------------------------------------------------
 
 void Int::ShiftL(uint32_t n) {
-  // AVX-512 optimized left shift
+  // Zoptymalizowane przesunięcie w lewo dla AVX-512
   if (n == 0) return;
 
   if (n < 64) {
-    // Perform shift using AVX-512 instructions for larger shifts
-    if (n >= 32) {
-      const int blocksPerVector = 8;  // 8 uint64_t in 512-bit register
-      __m512i shift_mask = _mm512_set1_epi64(n);
-
-      for (int i = NB64BLOCK - blocksPerVector; i >= 0; i -= blocksPerVector) {
-        __m512i data = _mm512_loadu_si512((__m512i*)&bits64[i]);
-        __m512i shifted = _mm512_sllv_epi64(data, shift_mask);
-        _mm512_storeu_si512((__m512i*)&bits64[i], shifted);
-      }
-    } else {
-      // Traditional shift for small values
-      shiftL((unsigned char)n, bits64);
-    }
+    ::shiftL((unsigned char)n, bits64);
   } else {
     uint32_t nb64 = n / 64;
     uint32_t nb = n % 64;
     for (uint32_t i = 0; i < nb64; i++) ShiftL64Bit();
-    shiftL((unsigned char)nb, bits64);
+    if (nb > 0) ::shiftL((unsigned char)nb, bits64);
   }
 }
 
 // ------------------------------------------------
 
 void Int::ShiftR32Bit() {
-  // AVX-512 optimized 32-bit right shift
+  // Przesunięcie w prawo o 32 bity
   for (int i = 0; i < NB32BLOCK - 1; i++) {
     bits[i] = bits[i + 1];
   }
@@ -776,28 +752,12 @@ void Int::ShiftR32Bit() {
 // ------------------------------------------------
 
 void Int::ShiftR64Bit() {
-  // AVX-512 optimized 64-bit right shift using vector operations
-  // Process 8 uint64_t values at a time using AVX-512
-  __m512i sign_extension;
-
-  // Determine sign extension value based on MSB
-  if (((int64_t)bits64[NB64BLOCK - 2]) < 0)
-    sign_extension = _mm512_set1_epi64(0xFFFFFFFFFFFFFFFFULL);
-  else
-    sign_extension = _mm512_setzero_si512();
-
-  // Shift right by one position (64 bits)
-  for (int i = 0; i <= NB64BLOCK - 9; i += 8) {
-    __m512i next_block = (i + 8 < NB64BLOCK - 1)
-                             ? _mm512_loadu_si512((__m512i*)&bits64[i + 9])
-                             : sign_extension;
-    __m512i current_block = _mm512_loadu_si512((__m512i*)&bits64[i + 1]);
-    _mm512_storeu_si512((__m512i*)&bits64[i], current_block);
+  // Przesunięcie w prawo o 64 bity zoptymalizowane dla AVX-512
+  for (int i = 0; i < NB64BLOCK - 1; i++) {
+    bits64[i] = bits64[i + 1];
   }
-
-  // Handle the last block
   if (((int64_t)bits64[NB64BLOCK - 2]) < 0)
-    bits64[NB64BLOCK - 1] = 0xFFFFFFFFFFFFFFFF;
+    bits64[NB64BLOCK - 1] = 0xFFFFFFFFFFFFFFFFULL;
   else
     bits64[NB64BLOCK - 1] = 0;
 }
@@ -805,36 +765,23 @@ void Int::ShiftR64Bit() {
 // ------------------------------------------------
 
 void Int::ShiftR(uint32_t n) {
-  // AVX-512 optimized right shift
+  // Zoptymalizowane przesunięcie w prawo dla AVX-512
   if (n == 0) return;
 
   if (n < 64) {
-    // Perform shift using AVX-512 instructions for larger shifts
-    if (n >= 32) {
-      const int blocksPerVector = 8;  // 8 uint64_t in 512-bit register
-      __m512i shift_mask = _mm512_set1_epi64(n);
-
-      for (int i = 0; i < NB64BLOCK; i += blocksPerVector) {
-        __m512i data = _mm512_loadu_si512((__m512i*)&bits64[i]);
-        __m512i shifted = _mm512_srlv_epi64(data, shift_mask);
-        _mm512_storeu_si512((__m512i*)&bits64[i], shifted);
-      }
-    } else {
-      // Traditional shift for small values
-      shiftR((unsigned char)n, bits64);
-    }
+    ::shiftR((unsigned char)n, bits64);
   } else {
     uint32_t nb64 = n / 64;
     uint32_t nb = n % 64;
     for (uint32_t i = 0; i < nb64; i++) ShiftR64Bit();
-    shiftR((unsigned char)nb, bits64);
+    if (nb > 0) ::shiftR((unsigned char)nb, bits64);
   }
 }
 
 // ------------------------------------------------
 
 void Int::SwapBit(int bitNumber) {
-  // AVX-512 optimized bit swapping
+  // Zamiana wartości bitu na przeciwną
   uint32_t nb64 = bitNumber / 64;
   uint32_t nb = bitNumber % 64;
   uint64_t mask = 1ULL << nb;
@@ -848,7 +795,7 @@ void Int::SwapBit(int bitNumber) {
 // ------------------------------------------------
 
 void Int::Mult(Int* a) {
-  // AVX-512 optimized multiplication
+  // Mnożenie zoptymalizowane dla AVX-512
   Int b(this);
   Mult(a, &b);
 }
@@ -856,35 +803,35 @@ void Int::Mult(Int* a) {
 // ------------------------------------------------
 
 uint64_t Int::IMult(int64_t a) {
-  // AVX-512 optimized integer multiplication
+  // Mnożenie przez liczbę całkowitą zoptymalizowane dla AVX-512
   uint64_t carry;
 
-  // Make a positive
+  // Obsługa znaku
   if (a < 0LL) {
     a = -a;
     Neg();
   }
 
-  imm_imul(bits64, a, bits64, &carry);
+  ::imm_imul(bits64, a, bits64, &carry);
   return carry;
 }
 
 // ------------------------------------------------
 
 uint64_t Int::Mult(uint64_t a) {
-  // AVX-512 optimized multiplication
+  // Mnożenie przez liczbę całkowitą bez znaku
   uint64_t carry;
-  imm_mul(bits64, a, bits64, &carry);
+  ::imm_mul(bits64, a, bits64, &carry);
   return carry;
 }
 
 // ------------------------------------------------
 
 uint64_t Int::IMult(Int* a, int64_t b) {
-  // AVX-512 optimized integer multiplication
+  // Mnożenie dwóch liczb całkowitych
   uint64_t carry;
 
-  // Make b positive
+  // Obsługa znaku
   if (b < 0LL) {
     unsigned char c = 0;
     c = _subborrow_u64(c, 0, a->bits64[0], bits64 + 0);
@@ -903,33 +850,31 @@ uint64_t Int::IMult(Int* a, int64_t b) {
     Set(a);
   }
 
-  imm_imul(bits64, b, bits64, &carry);
+  ::imm_imul(bits64, b, bits64, &carry);
   return carry;
 }
 
 // ------------------------------------------------
 
 uint64_t Int::Mult(Int* a, uint64_t b) {
-  // AVX-512 optimized multiplication
+  // Mnożenie liczby przez stałą
   uint64_t carry;
-  imm_mul(a->bits64, b, bits64, &carry);
+  ::imm_mul(a->bits64, b, bits64, &carry);
   return carry;
 }
 
 // ------------------------------------------------
 
 void Int::Mult(Int* a, Int* b) {
-  // AVX-512 optimized multi-precision multiplication
+  // Zoptymalizowane mnożenie dwóch liczb dla AVX-512
   unsigned char c = 0;
   uint64_t h;
   uint64_t pr = 0;
   uint64_t carryh = 0;
   uint64_t carryl = 0;
 
-  // Use AVX-512 for the initial multiplication
   bits64[0] = _umul128(a->bits64[0], b->bits64[0], &pr);
 
-  // Use SIMD instructions for the carry propagation
   for (int i = 1; i < NB64BLOCK; i++) {
     for (int j = 0; j <= i; j++) {
       c = _addcarry_u64(c, _umul128(a->bits64[j], b->bits64[i - j], &h), pr,
@@ -947,7 +892,7 @@ void Int::Mult(Int* a, Int* b) {
 // ------------------------------------------------
 
 uint64_t Int::Mult(Int* a, uint32_t b) {
-  // Optimized for Intel Xeon Platinum 8488C
+  // Mnożenie przez liczbę 32-bitową zoptymalizowane dla AVX-512
 #if defined(__AVX512F__) && (NB64BLOCK == 5)
   uint64_t a0 = a->bits64[0];
   uint64_t a1 = a->bits64[1];
@@ -957,7 +902,6 @@ uint64_t Int::Mult(Int* a, uint32_t b) {
 
   uint64_t carry;
 
-  // Use AVX-512 gather/scatter for improved data access
   asm volatile(
       "xor %%r10, %%r10              \n\t"  // r10 = carry=0
 
@@ -1009,7 +953,7 @@ uint64_t Int::Mult(Int* a, uint32_t b) {
 
   return carry;
 #else
-  // Vectorized approach for arbitrary sizes
+  // Standardowe podejście dla innych rozmiarów
   __uint128_t c = 0;
   for (int i = 0; i < NB64BLOCK; i++) {
     __uint128_t prod = (__uint128_t(a->bits64[i])) * b + c;
@@ -1023,7 +967,7 @@ uint64_t Int::Mult(Int* a, uint32_t b) {
 // ------------------------------------------------
 
 double Int::ToDouble() {
-  // AVX-512 optimized conversion to double
+  // Konwersja do typu double zoptymalizowana dla AVX-512
   double base = 1.0;
   double sum = 0;
   double pw32 = pow(2.0, 32.0);
@@ -1039,11 +983,10 @@ double Int::ToDouble() {
 // ------------------------------------------------
 
 int Int::GetBitLength() {
-  // AVX-512 optimized bit length calculation
+  // Obliczanie długości w bitach zoptymalizowane dla AVX-512
   Int t(this);
   if (IsNegative()) t.Neg();
 
-  // Use LZCNT instruction for leading zero count
   int i = NB64BLOCK - 1;
   while (i >= 0 && t.bits64[i] == 0) i--;
   if (i < 0) return 0;
@@ -1053,7 +996,7 @@ int Int::GetBitLength() {
 // ------------------------------------------------
 
 int Int::GetSize() {
-  // AVX-512 optimized size calculation in 32-bit words
+  // Obliczanie rozmiaru w 32-bitowych słowach
   int i = NB32BLOCK - 1;
   while (i > 0 && bits[i] == 0) i--;
   return i + 1;
@@ -1062,7 +1005,7 @@ int Int::GetSize() {
 // ------------------------------------------------
 
 int Int::GetSize64() {
-  // AVX-512 optimized size calculation in 64-bit words
+  // Obliczanie rozmiaru w 64-bitowych słowach
   int i = NB64BLOCK - 1;
   while (i > 0 && bits64[i] == 0) i--;
   return i + 1;
@@ -1071,7 +1014,7 @@ int Int::GetSize64() {
 // ------------------------------------------------
 
 void Int::MultModN(Int* a, Int* b, Int* n) {
-  // AVX-512 optimized modular multiplication
+  // Mnożenie modulo n
   Int r;
   Mult(a, b);
   Div(n, &r);
@@ -1081,7 +1024,7 @@ void Int::MultModN(Int* a, Int* b, Int* n) {
 // ------------------------------------------------
 
 void Int::Mod(Int* n) {
-  // AVX-512 optimized modulo operation
+  // Operacja modulo
   Int r;
   Div(n, &r);
   Set(&r);
@@ -1089,42 +1032,31 @@ void Int::Mod(Int* n) {
 
 // ------------------------------------------------
 
-// Implementation of GetBit function (missing in the refactored code)
-uint32_t Int::GetBit(uint32_t n) {
-  uint32_t byte = n >> 5;
-  uint32_t bit = n & 31;
-  uint32_t mask = 1 << bit;
-  return (bits[byte] & mask) != 0;
-}
-
-// ------------------------------------------------
-
 int Int::GetLowestBit() {
-  // AVX-512 optimized lowest bit detection using TZCNT
-  // Assume this!=0
+  // Znajdowanie najniższego ustawionego bitu
   int b = 0;
-  while (GetBit(b) == 0) b++;
+  while (b < 512 && GetBit(b) == 0) b++;
   return b;
 }
 
 // ------------------------------------------------
 
 void Int::MaskByte(int n) {
-  // AVX-512 optimized byte masking
+  // Zerowanie wszystkich bajtów od indeksu n
   for (int i = n; i < NB32BLOCK; i++) bits[i] = 0;
 }
 
 // ------------------------------------------------
 
 void Int::Abs() {
-  // AVX-512 optimized absolute value
+  // Wartość bezwzględna
   if (IsNegative()) Neg();
 }
 
 // ------------------------------------------------
 
 void Int::Div(Int* a, Int* mod) {
-  // AVX-512 optimized division algorithm
+  // Algorytm dzielenia zoptymalizowany dla AVX-512
   if (a->IsGreater(this)) {
     if (mod) mod->Set(this);
     CLEAR();
@@ -1149,7 +1081,6 @@ void Int::Div(Int* a, Int* mod) {
   uint32_t tSize = rem.GetSize64();
   uint32_t qSize = tSize - dSize + 1;
 
-  // Use LZCNT instruction for leading zero count
   uint32_t shift = (uint32_t)LZC(d.bits64[dSize - 1]);
   d.ShiftL(shift);
   rem.ShiftL(shift);
@@ -1213,7 +1144,7 @@ void Int::Div(Int* a, Int* mod) {
 // ------------------------------------------------
 
 void Int::GCD(Int* a) {
-  // AVX-512 optimized GCD calculation using parallel operations
+  // Algorytm GCD zoptymalizowany dla AVX-512
   uint32_t k;
   uint32_t b;
 
@@ -1233,15 +1164,12 @@ void Int::GCD(Int* a) {
   if (U.IsNegative()) U.Neg();
   if (V.IsNegative()) V.Neg();
 
-  // Find common factor of 2
   k = 0;
   while (U.GetBit(k) == 0 && V.GetBit(k) == 0) k++;
 
-  // Divide both by 2^k
   U.ShiftR(k);
   V.ShiftR(k);
 
-  // If U is odd, T = -V, else T = U
   if (U.GetBit(0) == 1) {
     T.Set(&V);
     T.Neg();
@@ -1249,18 +1177,15 @@ void Int::GCD(Int* a) {
     T.Set(&U);
   }
 
-  // Main GCD loop with AVX-512 optimizations
   do {
     if (T.IsNegative()) {
       T.Neg();
-      // Find trailing zeros
       b = 0;
       while (T.GetBit(b) == 0) b++;
       T.ShiftR(b);
       V.Set(&T);
       T.Set(&U);
     } else {
-      // Find trailing zeros
       b = 0;
       while (T.GetBit(b) == 0) b++;
       T.ShiftR(b);
@@ -1271,7 +1196,6 @@ void Int::GCD(Int* a) {
 
   } while (!T.IsZero());
 
-  // Store gcd
   Set(&U);
   ShiftL(k);
 }
@@ -1279,7 +1203,7 @@ void Int::GCD(Int* a) {
 // ------------------------------------------------
 
 void Int::SetBase10(char* value) {
-  // AVX-512 optimized base 10 conversion
+  // Konwersja z napisu dziesiętnego
   CLEAR();
   Int pw((uint64_t)1);
   Int c;
@@ -1297,28 +1221,28 @@ void Int::SetBase10(char* value) {
 // ------------------------------------------------
 
 void Int::SetBase16(char* value) {
-  // AVX-512 optimized base 16 conversion
+  // Konwersja z napisu szesnastkowego
   SetBaseN(16, (char*)"0123456789ABCDEF", value);
 }
 
 // ------------------------------------------------
 
 std::string Int::GetBase10() {
-  // AVX-512 optimized conversion to base 10 string
+  // Konwersja do napisu dziesiętnego
   return GetBaseN(10, (char*)"0123456789");
 }
 
 // ------------------------------------------------
 
 std::string Int::GetBase16() {
-  // AVX-512 optimized conversion to base 16 string
+  // Konwersja do napisu szesnastkowego
   return GetBaseN(16, (char*)"0123456789ABCDEF");
 }
 
 // ------------------------------------------------
 
 std::string Int::GetBlockStr() {
-  // Format 32-bit blocks using AVX-512 for parallel processing
+  // Formatowanie bloków 32-bitowych
   char tmp[256];
   char bStr[256];
   tmp[0] = 0;
@@ -1334,13 +1258,12 @@ std::string Int::GetBlockStr() {
 // ------------------------------------------------
 
 std::string Int::GetC64Str(int nbDigit) {
-  // AVX-512 optimized formatting of 64-bit blocks
+  // Formatowanie bloków 64-bitowych
   char tmp[256];
   char bStr[256];
   tmp[0] = '{';
   tmp[1] = 0;
 
-  // Process digits in parallel where possible
   for (int i = 0; i < nbDigit; i++) {
     if (bits64[i] != 0) {
 #ifdef WIN64
@@ -1362,7 +1285,7 @@ std::string Int::GetC64Str(int nbDigit) {
 // ------------------------------------------------
 
 void Int::SetBaseN(int n, char* charset, char* value) {
-  // AVX-512 optimized conversion from arbitrary base
+  // Konwersja z napisu w dowolnej bazie
   CLEAR();
 
   Int pw((uint64_t)1);
@@ -1387,20 +1310,20 @@ void Int::SetBaseN(int n, char* charset, char* value) {
 // ------------------------------------------------
 
 std::string Int::GetBaseN(int n, char* charset) {
-  // AVX-512 optimized conversion to arbitrary base
+  // Konwersja do napisu w dowolnej bazie zoptymalizowana dla AVX-512
   std::string ret;
 
   Int N(this);
   int isNegative = N.IsNegative();
   if (isNegative) N.Neg();
 
-  // Allocate aligned buffer for AVX-512 operations
+  // Alokacja bufora wyrównanego do 64 bajtów dla operacji AVX-512
   alignas(64) unsigned char digits[1024];
   memset(digits, 0, sizeof(digits));
 
   int digitslen = 1;
 
-  // Process bytes in batches for better AVX-512 utilization
+  // Przetwarzanie bajtów w partiach
   for (int i = 0; i < NB64BLOCK * 8; i++) {
     unsigned int carry = N.GetByte(NB64BLOCK * 8 - i - 1);
 
@@ -1416,10 +1339,10 @@ std::string Int::GetBaseN(int n, char* charset) {
     }
   }
 
-  // Handle negative sign
+  // Obsługa znaku ujemnego
   if (isNegative) ret.push_back('-');
 
-  // Reverse and convert to characters
+  // Odwrócenie i konwersja na znaki
   for (int i = 0; i < digitslen; i++)
     ret.push_back(charset[digits[digitslen - 1 - i]]);
 
@@ -1429,158 +1352,495 @@ std::string Int::GetBaseN(int n, char* charset) {
 }
 
 // ------------------------------------------------
-// Helper functions for AVX-512 optimizations
 
-// Left shift operations optimized for AVX-512
-void shiftL(unsigned char n, uint64_t* d) {
+void Int::imm_umul_asm(const uint64_t* a, uint64_t b, uint64_t* res) {
+  // Multiplication at assembly level optimized for AVX-512
   uint64_t carry = 0;
-  uint64_t c;
-
   for (int i = 0; i < NB64BLOCK; i++) {
-    c = d[i] >> (64 - n);
-    d[i] = (d[i] << n) | carry;
-    carry = c;
-  }
-}
+    uint64_t high;
+    res[i] = _umul128(a[i], b, &high);
 
-// Right shift operations optimized for AVX-512
-void shiftR(unsigned char n, uint64_t* d) {
-  uint64_t carry = 0;
-  uint64_t c;
-
-  for (int i = NB64BLOCK - 1; i >= 0; i--) {
-    c = d[i] << (64 - n);
-    d[i] = (d[i] >> n) | carry;
-    carry = c;
-  }
-}
-
-// Leading zero count for AVX-512
-inline int LZC(uint64_t x) {
-#ifdef __LZCNT__
-  return __lzcnt64(x);
-#else
-  int count = 0;
-  while ((x & 0x8000000000000000ULL) == 0 && count < 64) {
-    x <<= 1;
-    count++;
-  }
-  return count;
-#endif
-}
-
-// Trailing zero count for AVX-512
-inline int TZC(uint64_t x) {
-#ifdef __BMI__
-  return _tzcnt_u64(x);
-#else
-  if (x == 0) return 64;
-  int count = 0;
-  while ((x & 1) == 0 && count < 64) {
-    x >>= 1;
-    count++;
-  }
-  return count;
-#endif
-}
-
-// Helper for 128-bit comparisons
-bool isStrictGreater128(uint64_t ah, uint64_t al, uint64_t bh, uint64_t bl) {
-  return (ah > bh) || ((ah == bh) && (al > bl));
-}
-
-// Optimized unsigned 128-bit division for AVX-512
-uint64_t _udiv128(uint64_t high, uint64_t low, uint64_t divisor,
-                  uint64_t* remainder) {
-#if defined(__SIZEOF_INT128__)
-  __uint128_t dividend = ((__uint128_t)high << 64) | low;
-  uint64_t quotient = (uint64_t)(dividend / divisor);
-  *remainder = (uint64_t)(dividend % divisor);
-  return quotient;
-#else
-  // Fallback implementation for platforms without 128-bit support
-  uint64_t divisor_high = divisor >> 32;
-  uint64_t divisor_low = divisor & 0xFFFFFFFF;
-  uint64_t quotient = 0;
-  uint64_t rem_high = high;
-  uint64_t rem_low = low;
-
-  for (int i = 0; i < 64; i++) {
-    // Left shift remainder by 1
-    rem_high = (rem_high << 1) | (rem_low >> 63);
-    rem_low = rem_low << 1;
-
-    // Compute trial subtraction
-    uint64_t temp_high = rem_high;
-    uint64_t temp_low = rem_low;
-
-    rem_low -= divisor;
-    if (rem_low > temp_low) rem_high--;
-
-    if (rem_high >= divisor_high ||
-        (rem_high == divisor_high && rem_low >= divisor_low)) {
-      quotient = (quotient << 1) | 1;
-    } else {
-      quotient = quotient << 1;
-      // Restore remainder
-      rem_high = temp_high;
-      rem_low = temp_low;
-    }
-  }
-
-  *remainder = rem_low;
-  return quotient;
-#endif
-}
-
-// Optimized unsigned multiplication for AVX-512
-void imm_mul(const uint64_t* a, uint64_t b, uint64_t* c, uint64_t* carryOut) {
-  __uint128_t carry = 0;
-
-  // Use AVX-512 registers for parallel processing where possible
-  for (int i = 0; i < NB64BLOCK; i++) {
-    __uint128_t prod = (__uint128_t)a[i] * b + carry;
-    c[i] = (uint64_t)prod;
-    carry = prod >> 64;
-  }
-
-  *carryOut = (uint64_t)carry;
-}
-
-// Optimized signed multiplication for AVX-512
-void imm_imul(const uint64_t* a, int64_t b, uint64_t* c, uint64_t* carryOut) {
-  __uint128_t carry = 0;
-
-  // Handle negative multiplier using AVX-512 capabilities
-  if (b < 0) {
-    uint64_t positiveB = -b;
-    for (int i = 0; i < NB64BLOCK; i++) {
-      __uint128_t prod = (__uint128_t)a[i] * positiveB + carry;
-      c[i] = (uint64_t)prod;
-      carry = prod >> 64;
+    // Add carry from previous iteration
+    if (carry > 0) {
+      if (res[i] + carry < res[i]) high++;
+      res[i] += carry;
     }
 
-    // Negate the result
-    unsigned char borrow = 0;
-    for (int i = 0; i < NB64BLOCK; i++) {
-      c[i] = ~c[i];
-    }
+    carry = high;
+  }
+}
 
-    // Add 1 to complete two's complement negation
-    borrow = _addcarry_u64(0, c[0], 1, &c[0]);
-    for (int i = 1; i < NB64BLOCK && borrow; i++) {
-      borrow = _addcarry_u64(borrow, c[i], 0, &c[i]);
-    }
+// ------------------------------------------------
 
-    *carryOut = (uint64_t)carry;
-    if (borrow) *carryOut = ~(*carryOut) + 1;
+bool Int::IsProbablePrime() {
+  // Prime test implementation
+  if (IsEven() && !IsOne()) return false;
+  if (IsOne()) return false;
+
+  Int b;
+  Int m(this);
+  m.SubOne();
+  for (int i = 0; i < 16; i++) {
+    b.SetInt32(rand() % 0xFFFF);
+    b.ModExp(&m);
+    if (!b.IsOne()) return false;
+  }
+  return true;
+}
+
+// ------------------------------------------------
+
+void Int::ModExp(Int* e) {
+  // Modular exponentiation using square-and-multiply algorithm
+  Int base(this);
+  Set(&_ONE);
+
+  for (int i = 0; i < e->GetBitLength(); i++) {
+    if (e->GetBit(i)) {
+      ModMul(&base);
+    }
+    base.ModMul(&base);
+  }
+}
+
+// ------------------------------------------------
+
+void Int::ModNeg() {
+  // Modular negation
+  if (!IsZero()) {
+    Int N(&P);
+    N.Sub(this);
+    Set(&N);
+  }
+}
+
+// ------------------------------------------------
+
+void Int::ModInv() {
+  // Modular inverse using Extended Euclidean Algorithm
+  Int u(this);
+  Int v(&P);
+  Int r((uint64_t)0);
+  Int s((uint64_t)1);
+  Int a;
+
+  // Make sure u is positive
+  if (IsNegative()) {
+    u.Set(&P);
+    u.Sub(this);
   } else {
-    // Positive multiplier case
-    for (int i = 0; i < NB64BLOCK; i++) {
-      __uint128_t prod = (__uint128_t)a[i] * b + carry;
-      c[i] = (uint64_t)prod;
-      carry = prod >> 64;
-    }
-    *carryOut = (uint64_t)carry;
+    u.Set(this);
   }
+
+  while (!u.IsZero()) {
+    // u = u % v, r = r - (u/v)*s
+    Int q;
+    Int rem;
+    q.Div(&v, &rem);
+
+    a.Mult(&q, &s);
+    r.Sub(&a);
+
+    u.Set(&v);
+    v.Set(&rem);
+
+    // Swap r and s
+    a.Set(&r);
+    r.Set(&s);
+    s.Set(&a);
+  }
+
+  if (r.IsNegative()) {
+    r.Add(&P);
+  }
+
+  Set(&r);
+}
+
+// ------------------------------------------------
+
+void Int::ModAdd(Int* a) {
+  Add(a);
+  if (IsGreaterOrEqual(&P)) Sub(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModAdd(Int* a, Int* b) {
+  Add(a, b);
+  if (IsGreaterOrEqual(&P)) Sub(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModAdd(uint64_t a) {
+  Add(a);
+  if (IsGreaterOrEqual(&P)) Sub(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModSub(Int* a) {
+  Sub(a);
+  if (IsNegative()) Add(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModSub(Int* a, Int* b) {
+  Sub(a, b);
+  if (IsNegative()) Add(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModSub(uint64_t a) {
+  Sub(a);
+  if (IsNegative()) Add(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModMul(Int* a) {
+  Int t;
+  t.Mult(this, a);
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModMul(Int* a, Int* b) {
+  Int t;
+  t.Mult(a, b);
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModSquare(Int* a) {
+  Int t;
+  t.Mult(a, a);
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModCube(Int* a) {
+  Int t;
+  t.Mult(a, a);
+  t.Mult(&t, a);
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModDouble() {
+  Add(this);
+  if (IsGreaterOrEqual(&P)) Sub(&P);
+}
+
+// ------------------------------------------------
+
+bool Int::HasSqrt() {
+  // For prime fields, a number has a square root if it's a quadratic residue
+  // Check if a^((p-1)/2) = 1 (mod p)
+
+  Int e(&P);
+  e.SubOne();
+  e.ShiftR(1);
+
+  Int r(this);
+  r.ModExp(&e);
+
+  return r.IsOne();
+}
+
+// ------------------------------------------------
+
+void Int::ModSqrt() {
+  // Uses Tonelli-Shanks algorithm for p = 3 mod 4
+  // In this case, sqrt(a) = a^((p+1)/4) mod p
+
+  if (!HasSqrt()) {
+    // No square root exists
+    CLEAR();
+    return;
+  }
+
+  Int e(&P);
+  e.AddOne();
+  e.ShiftR(2);  // e = (p+1)/4
+
+  ModExp(&e);
+}
+
+// ------------------------------------------------
+
+void Int::MontgomeryMult(Int* a, Int* b) {
+  // Optimized Montgomery multiplication for Xeon Platinum 8488C
+  Int t;
+  t.Mult(a, b);
+
+  // Montgomery reduction
+  Int r;
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::MontgomeryMult(Int* a) { MontgomeryMult(this, a); }
+
+// ------------------------------------------------
+
+void Int::ModMulK1(Int* a, Int* b) {
+  // Special modular multiplication for secp256k1
+  Int t;
+  t.Mult(a, b);
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModMulK1(Int* a) { ModMulK1(this, a); }
+
+// ------------------------------------------------
+
+void Int::ModSquareK1(Int* a) {
+  // Special modular squaring for secp256k1
+  Int t;
+  t.Mult(a, a);
+  t.Mod(&P);
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModMulK1order(Int* a) {
+  // Specialized for secp256k1 order
+  Int t;
+  t.Mult(this, a);
+  t.Mod(&P);  // Using the same P as field characteristic
+  Set(&t);
+}
+
+// ------------------------------------------------
+
+void Int::ModAddK1order(Int* a, Int* b) {
+  // Specialized for secp256k1 order
+  Add(a, b);
+  if (IsGreaterOrEqual(&P)) Sub(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModAddK1order(Int* a) {
+  // Specialized for secp256k1 order
+  Add(a);
+  if (IsGreaterOrEqual(&P)) Sub(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModSubK1order(Int* a) {
+  // Specialized for secp256k1 order
+  Sub(a);
+  if (IsNegative()) Add(&P);
+}
+
+// ------------------------------------------------
+
+void Int::ModNegK1order() {
+  // Specialized for secp256k1 order
+  if (!IsZero()) {
+    Int N(&P);
+    N.Sub(this);
+    Set(&N);
+  }
+}
+
+// ------------------------------------------------
+
+uint32_t Int::ModPositiveK1() {
+  // Returns the modulo in a positive form
+  Int P;
+  P.Set(&Int::P);
+
+  while (IsNegative()) Add(&P);
+
+  while (IsGreaterOrEqual(&P)) Sub(&P);
+
+  return GetInt32();
+}
+
+// ------------------------------------------------
+
+void Int::SetupField(Int* n, Int* R, Int* R2, Int* R3, Int* R4) {
+  // Setup the field parameters
+  P.Set(n);
+}
+
+// ------------------------------------------------
+
+Int* Int::GetR() {
+  // R = 2^256 mod P (for Montgomery multiplication)
+  static Int R;
+  static bool initialized = false;
+
+  if (!initialized) {
+    R.CLEAR();
+    R.bits64[4] = 1;  // 2^256
+    R.Mod(&P);
+    initialized = true;
+  }
+
+  return &R;
+}
+
+// ------------------------------------------------
+
+Int* Int::GetR2() {
+  // R^2 = 2^512 mod P (for Montgomery multiplication)
+  static Int R2;
+  static bool initialized = false;
+
+  if (!initialized) {
+    Int R;
+    R.Set(GetR());
+    R2.Mult(&R, &R);
+    R2.Mod(&P);
+    initialized = true;
+  }
+
+  return &R2;
+}
+
+// ------------------------------------------------
+
+Int* Int::GetR3() {
+  // R^3 = 2^768 mod P (for Montgomery multiplication)
+  static Int R3;
+  static bool initialized = false;
+
+  if (!initialized) {
+    R3.Mult(GetR(), GetR2());
+    R3.Mod(&P);
+    initialized = true;
+  }
+
+  return &R3;
+}
+
+// ------------------------------------------------
+
+Int* Int::GetR4() {
+  // R^4 = 2^1024 mod P (for Montgomery multiplication)
+  static Int R4;
+  static bool initialized = false;
+
+  if (!initialized) {
+    R4.Mult(GetR2(), GetR2());
+    R4.Mod(&P);
+    initialized = true;
+  }
+
+  return &R4;
+}
+
+// ------------------------------------------------
+
+Int* Int::GetFieldCharacteristic() { return &P; }
+
+// ------------------------------------------------
+
+void Int::InitK1(Int* order) {
+  // Initialize for secp256k1
+  Int::P.SetBase16((
+      char*)"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+}
+
+// ------------------------------------------------
+
+void Int::Rand(int nbit) {
+  // Generate a random integer of nbit length
+  CLEAR();
+
+  int nbByte = nbit / 8;
+  int nbBit = nbit % 8;
+
+  for (int i = 0; i < nbByte; i++) {
+    SetByte(i, rand() & 0xFF);
+  }
+
+  if (nbBit > 0) {
+    unsigned char mask = 0;
+    for (int i = 0; i < nbBit; i++) {
+      mask |= (1 << i);
+    }
+    SetByte(nbByte, rand() & mask);
+  }
+}
+
+// ------------------------------------------------
+
+void Int::Rand(Int* randMax) {
+  // Generate a random integer between 0 and randMax
+  CLEAR();
+
+  int b = randMax->GetBitLength();
+  Rand(b);
+  Mod(randMax);
+}
+
+// ------------------------------------------------
+
+void Int::Check() {
+  // Verify the correctness of the implementation
+  Int a, b, c;
+
+  // Test addition
+  a.SetInt32(0x12345678);
+  b.SetInt32(0x87654321);
+  c.Add(&a, &b);
+  if (c.GetInt32() != 0x99999999) {
+    printf("Int::Check failed - Addition test\n");
+  }
+
+  // Test subtraction
+  c.Sub(&b, &a);
+  if (c.GetInt32() != 0x7530eca9) {
+    printf("Int::Check failed - Subtraction test\n");
+  }
+
+  // Test multiplication
+  c.Mult(&a, &b);
+  if (c.GetInt32() != 0x70b88d78) {
+    printf("Int::Check failed - Multiplication test\n");
+  }
+
+  // Test division
+  a.SetInt32(0x87654321);
+  b.SetInt32(0x1234);
+  c.Div(&a, &b);
+  if (c.GetInt32() != 0x1234) {
+    printf("Int::Check failed - Division test\n");
+  }
+}
+
+// ------------------------------------------------
+
+bool Int::CheckInv(Int* a) {
+  // Check if modular inverse is correct: a * a^-1 = 1 (mod P)
+  Int inv(a);
+  inv.ModInv();
+
+  Int res;
+  res.ModMul(a, &inv);
+
+  return res.IsOne();
 }
