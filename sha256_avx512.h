@@ -3,8 +3,6 @@
 
 #include <cstdint>
 
-// SHA-256 implementation optimized for AVX-512 on Intel Xeon Platinum 8488C
-// Processes 16 message blocks in parallel using full 512-bit AVX-512 registers
 void sha256avx512_16B(
     const uint8_t* data0, const uint8_t* data1, const uint8_t* data2,
     const uint8_t* data3, const uint8_t* data4, const uint8_t* data5,
