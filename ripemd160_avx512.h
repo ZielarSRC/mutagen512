@@ -7,13 +7,13 @@
 
 namespace ripemd160avx512 {
 
-// Initialize RIPEMD-160 state for AVX-512 (16 parallel lanes)
+// Initialize RIPEMD-160 state for 16-way parallel processing
 void Initialize(__m512i *state);
 
-// Transform function using AVX-512 for 16 parallel computations
+// Transform function for 16-way parallel RIPEMD-160
 void Transform(__m512i *state, uint8_t *blocks[16]);
 
-// Hash function for 16 messages of 32 bytes each in parallel
+// Main RIPEMD-160 function - 16-way parallel for 32-byte inputs
 void ripemd160avx512_32(unsigned char *i0, unsigned char *i1, unsigned char *i2,
                         unsigned char *i3, unsigned char *i4, unsigned char *i5,
                         unsigned char *i6, unsigned char *i7, unsigned char *i8,
@@ -27,12 +27,6 @@ void ripemd160avx512_32(unsigned char *i0, unsigned char *i1, unsigned char *i2,
                         unsigned char *d10, unsigned char *d11,
                         unsigned char *d12, unsigned char *d13,
                         unsigned char *d14, unsigned char *d15);
-
-// Batch processing function for easier integration
-void ripemd160avx512_batch(
-    unsigned char **inputs,  // Array of 16 input pointers
-    unsigned char **outputs  // Array of 16 output pointers
-);
 
 }  // namespace ripemd160avx512
 
