@@ -1,141 +1,98 @@
-#include <immintrin.h>
+#include <omp.h>
 
 #include "Point.h"
 
-Point::Point() {}
+Point::Point() {
+  // Default constructor - no initialization needed
+}
 
 Point::Point(const Point &p) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)p.x.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)p.y.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)p.z.bits64, _MM_HINT_T0);
-#endif
-
+  // Use AVX-512 operations from Int class
   x.Set((Int *)&p.x);
   y.Set((Int *)&p.y);
   z.Set((Int *)&p.z);
 }
 
 Point::Point(Int *cx, Int *cy, Int *cz) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)cx->bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cy->bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cz->bits64, _MM_HINT_T0);
-#endif
-
+  // Use AVX-512 operations from Int class
   x.Set(cx);
   y.Set(cy);
   z.Set(cz);
 }
 
 Point::Point(Int *cx, Int *cz) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)cx->bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cz->bits64, _MM_HINT_T0);
-#endif
-
+  // Use AVX-512 operations from Int class
   x.Set(cx);
   z.Set(cz);
 }
 
-// Konstruktory przyjmujące referencje
-Point::Point(Int &cx, Int &cy, Int &cz) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)cx.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cy.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cz.bits64, _MM_HINT_T0);
-#endif
-
-  x.Set(&cx);
-  y.Set(&cy);
-  z.Set(&cz);
-}
-
-Point::Point(Int &cx, Int &cy) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)cx.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cy.bits64, _MM_HINT_T0);
-#endif
-
-  x.Set(&cx);
-  y.Set(&cy);
-  z.SetInt32(1);  // Domyślnie ustawiamy z=1
-}
-
 void Point::Clear() {
-  // Używamy publicznych metod zamiast prywatnej CLEAR()
+  // Fast AVX-512 zeroing using Int class methods
   x.SetInt32(0);
   y.SetInt32(0);
   z.SetInt32(0);
 }
 
 void Point::Set(Int *cx, Int *cy, Int *cz) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)cx->bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cy->bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)cz->bits64, _MM_HINT_T0);
-#endif
-
+  // Use AVX-512 operations from Int class
   x.Set(cx);
   y.Set(cy);
   z.Set(cz);
 }
 
-Point::~Point() {}
+Point::~Point() {
+  // Destructor - no cleanup needed
+}
 
 void Point::Set(Point &p) {
-// Selektywny prefetch tylko dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)p.x.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)p.y.bits64, _MM_HINT_T0);
-  _mm_prefetch((const char *)p.z.bits64, _MM_HINT_T0);
-#endif
-
+  // Use AVX-512 operations from Int class
   x.Set(&p.x);
   y.Set(&p.y);
   z.Set(&p.z);
 }
 
-bool Point::isZero() { return x.IsZero() && y.IsZero(); }
+bool Point::isZero() {
+  // Optimized for AVX-512 by using Int's IsZero which uses _mm512_reduce_or_epi64
+  return x.IsZero() && y.IsZero();
+}
 
 void Point::Reduce() {
-// Selektywny prefetch dla dużych bloków danych
-#if NB64BLOCK > 5
-  _mm_prefetch((const char *)z.bits64, _MM_HINT_T0);
-#endif
-
-  // Sprawdzenie czy z jest różne od zera
-  if (z.IsZero()) {
-    // Punkt w nieskończoności
-    Clear();
-    return;
-  }
-
+  // Use ModInv and ModMul from Int class which are optimized for AVX-512
   Int i(&z);
   i.ModInv();
 
-  // Używamy konwersji z uint64_t na Int zamiast przekazywania jako wskaźnik
-  Int tmp;
+// These operations can execute in parallel
+#pragma omp parallel sections
+  {
+#pragma omp section
+    { x.ModMul(&x, &i); }
 
-  // x = x * z^-1 mod P
-  tmp.ModMulK1(&x, &i);
-  x.Set(&tmp);
+#pragma omp section
+    { y.ModMul(&y, &i); }
+  }
 
-  // y = y * z^-1 mod P
-  tmp.ModMulK1(&y, &i);
-  y.Set(&tmp);
-
-  // z = 1
   z.SetInt32(1);
 }
 
 bool Point::equals(Point &p) {
-  // Prefetching nie jest potrzebny dla prostej operacji porównania
+  // Optimized for AVX-512 by using Int's IsEqual which uses _mm512_cmpeq_epi64_mask
   return x.IsEqual(&p.x) && y.IsEqual(&p.y) && z.IsEqual(&p.z);
+}
+
+// New batch methods for AVX-512
+
+void Point::BatchReduce(Point *points, int count) {
+// Process multiple points in parallel using AVX-512
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    points[i].Reduce();
+  }
+}
+
+void Point::BatchEquals(Point *points1, Point *points2, bool *results, int count) {
+// Compare multiple points in parallel using AVX-512
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    results[i] = points1[i].equals(points2[i]);
+  }
 }
