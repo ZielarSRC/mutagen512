@@ -53,8 +53,9 @@ static const int ss[80] = {8,  9,  9,  11, 13, 15, 15, 5,  7,  7,  8,  11, 14, 1
                            8,  5,  12, 9,  12, 5,  14, 6,  8,  13, 6,  5,  15, 13, 11, 11};
 
 // Optimized version for AVX-512
-#pragma unroll(16)
-static inline void compress_block_avx512(__m512i* state, const __m512i* chunk) {
+// Zmieniono #pragma unroll(16) na format kompatybilny z Intel
+#pragma unroll
+static void compress_block_avx512(__m512i* state, const __m512i* chunk) {
   __m512i a = state[0];
   __m512i b = state[1];
   __m512i c = state[2];
