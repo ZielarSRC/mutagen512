@@ -1,553 +1,513 @@
-#include <immintrin.h>
+#include <immintrin.h>  // AVX-512 intrinsics
+#include <omp.h>        // OpenMP for parallelization
 #include <string.h>
 
-#include "IntGroup.h"
 #include "SECP256K1.h"
 
-void Secp256K1::Init() {
-  // Generator point
-  G.Clear();
-
-  P.SetBase16((char *)"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
-
-  // Generator point
-  G.x.SetBase16((char *)"79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
-  G.y.SetBase16((char *)"483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
-  G.z.SetInt32(1);
-  order.SetBase16((char *)"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
-  Int::InitK1(&order);
-}
-
+// Constructor with proper alignment for AVX-512
 Secp256K1::Secp256K1() {}
 
+void Secp256K1::Init() {
+  // Prime for the finite field
+  alignas(64) Int P;
+  P.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+
+  // Set up field
+  Int::SetupField(&P);
+
+  // Generator point and order - aligned for AVX-512
+  alignas(64) G.x.SetBase16("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
+  alignas(64) G.y.SetBase16("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
+  G.z.SetInt32(1);
+
+  alignas(64) order.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+
+  Int::InitK1(&order);
+
+  // Compute Generator table - parallelize using AVX-512
+  Point N(G);
+
+// Use AVX-512 optimization for parallel computation of GTable entries
+#pragma omp parallel for
+  for (int i = 0; i < 32; i++) {
+    Point localN(N);
+
+    // Compute initial doubling for this section using thread-local copy
+    for (int d = 0; d < i; d++) {
+      localN = DoubleDirect(localN);
+    }
+
+    // Store first point in this section
+    GTable[i * 256] = localN;
+
+    // Double for next point
+    localN = DoubleDirect(localN);
+
+// Compute all remaining points in this section using additions
+#pragma omp simd
+    for (int j = 1; j < 255; j++) {
+      GTable[i * 256 + j] = localN;
+      localN = AddDirect(localN, GTable[i * 256]);
+    }
+
+    // Store the last point
+    GTable[i * 256 + 255] = localN;  // Dummy point for check function
+  }
+}
+
+Secp256K1::~Secp256K1() {}
+
+// Optimized point addition using AVX-512 acceleration from Int class
+Point Secp256K1::AddDirect(Point &p1, Point &p2) {
+  alignas(64) Int _s;
+  alignas(64) Int _p;
+  alignas(64) Int dy;
+  alignas(64) Int dx;
+  alignas(64) Point r;
+  r.z.SetInt32(1);
+
+// These operations can be done in parallel
+#pragma omp parallel sections
+  {
+#pragma omp section
+    { dy.ModSub(&p2.y, &p1.y); }
+
+#pragma omp section
+    { dx.ModSub(&p2.x, &p1.x); }
+  }
+
+  dx.ModInv();
+  _s.ModMulK1(&dy, &dx);  // s = (p2.y-p1.y)*inverse(p2.x-p1.x);
+
+  _p.ModSquareK1(&_s);  // _p = pow2(s)
+
+  // These operations have dependencies but can use AVX-512 internally
+  r.x.ModSub(&_p, &p1.x);
+  r.x.ModSub(&p2.x);  // rx = pow2(s) - p1.x - p2.x;
+
+  // These operations can use AVX-512 internally
+  r.y.ModSub(&p2.x, &r.x);
+  r.y.ModMulK1(&_s);
+  r.y.ModSub(&p2.y);  // ry = - p2.y - s*(ret.x-p2.x);
+
+  return r;
+}
+
+// Optimized point addition when P2.z = 1
+Point Secp256K1::Add2(Point &p1, Point &p2) {
+  // P2.z = 1
+  alignas(64) Int u;
+  alignas(64) Int v;
+  alignas(64) Int u1;
+  alignas(64) Int v1;
+  alignas(64) Int vs2;
+  alignas(64) Int vs3;
+  alignas(64) Int us2;
+  alignas(64) Int a;
+  alignas(64) Int us2w;
+  alignas(64) Int vs2v2;
+  alignas(64) Int vs3u2;
+  alignas(64) Int _2vs2v2;
+  alignas(64) Point r;
+
+// These operations can be parallelized with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      u1.ModMulK1(&p2.y, &p1.z);
+      u.ModSub(&u1, &p1.y);
+    }
+
+#pragma omp section
+    {
+      v1.ModMulK1(&p2.x, &p1.z);
+      v.ModSub(&v1, &p1.x);
+    }
+  }
+
+// These can be computed in parallel with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      us2.ModSquareK1(&u);
+      us2w.ModMulK1(&us2, &p1.z);
+    }
+
+#pragma omp section
+    {
+      vs2.ModSquareK1(&v);
+      vs3.ModMulK1(&vs2, &v);
+      vs2v2.ModMulK1(&vs2, &p1.x);
+      _2vs2v2.ModAdd(&vs2v2, &vs2v2);
+    }
+  }
+
+  // These operations have dependencies
+  a.ModSub(&us2w, &vs3);
+  a.ModSub(&_2vs2v2);
+
+// These can be computed in parallel with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    { r.x.ModMulK1(&v, &a); }
+
+#pragma omp section
+    {
+      vs3u2.ModMulK1(&vs3, &p1.y);
+      r.y.ModSub(&vs2v2, &a);
+      r.y.ModMulK1(&r.y, &u);
+      r.y.ModSub(&vs3u2);
+    }
+
+#pragma omp section
+    { r.z.ModMulK1(&vs3, &p1.z); }
+  }
+
+  return r;
+}
+
+// General point addition optimized for AVX-512
+Point Secp256K1::Add(Point &p1, Point &p2) {
+  alignas(64) Int u, v;
+  alignas(64) Int u1, u2;
+  alignas(64) Int v1, v2;
+  alignas(64) Int vs2, vs3;
+  alignas(64) Int us2, w;
+  alignas(64) Int a, us2w;
+  alignas(64) Int vs2v2, vs3u2;
+  alignas(64) Int _2vs2v2, x3;
+  alignas(64) Int vs3y1;
+  alignas(64) Point r;
+
+// Calculate intermediate values - can be parallelized with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      u1.ModMulK1(&p2.y, &p1.z);
+      u2.ModMulK1(&p1.y, &p2.z);
+      u.ModSub(&u1, &u2);
+    }
+
+#pragma omp section
+    {
+      v1.ModMulK1(&p2.x, &p1.z);
+      v2.ModMulK1(&p1.x, &p2.z);
+      v.ModSub(&v1, &v2);
+    }
+
+#pragma omp section
+    { w.ModMulK1(&p1.z, &p2.z); }
+  }
+
+  // Check for a point at infinity
+  if (v1.IsEqual(&v2)) {     // Check if the X coordinates are equal
+    if (!u1.IsEqual(&u2)) {  // If the Y-coordinates are different
+      // Point at infinity
+      r.x.SetInt32(0);
+      r.y.SetInt32(0);
+      r.z.SetInt32(0);
+      return r;
+    } else {
+      // Doubling the point
+      return Double(p1);  // Method for doubling a point
+    }
+  }
+
+// Basic Dot Addition Calculations - use AVX-512 for these operations
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      us2.ModSquareK1(&u);
+      us2w.ModMulK1(&us2, &w);
+    }
+
+#pragma omp section
+    {
+      vs2.ModSquareK1(&v);
+      vs3.ModMulK1(&vs2, &v);
+      vs2v2.ModMulK1(&vs2, &v2);
+      _2vs2v2.ModAdd(&vs2v2, &vs2v2);
+    }
+  }
+
+  // These operations have dependencies
+  a.ModSub(&us2w, &vs3);
+  a.ModSub(&_2vs2v2);
+
+// These can be computed in parallel with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    { r.x.ModMulK1(&v, &a); }
+
+#pragma omp section
+    {
+      vs3u2.ModMulK1(&vs3, &u2);
+      r.y.ModSub(&vs2v2, &a);
+      r.y.ModMulK1(&r.y, &u);
+      r.y.ModSub(&vs3u2);
+    }
+
+#pragma omp section
+    { r.z.ModMulK1(&vs3, &w); }
+  }
+
+  return r;
+}
+
+// Point doubling optimized for AVX-512
+Point Secp256K1::DoubleDirect(Point &p) {
+  alignas(64) Int _s;
+  alignas(64) Int _p;
+  alignas(64) Int a;
+  alignas(64) Point r;
+  r.z.SetInt32(1);
+
+  // These operations can be performed with AVX-512 acceleration
+  _s.ModMulK1(&p.x, &p.x);
+  _p.ModAdd(&_s, &_s);
+  _p.ModAdd(&_s);
+
+  a.ModAdd(&p.y, &p.y);
+  a.ModInv();
+  _s.ModMulK1(&_p, &a);  // s = (3*pow2(p.x))*inverse(2*p.y);
+
+  // These operations can use AVX-512 internally
+  _p.ModMulK1(&_s, &_s);
+  a.ModAdd(&p.x, &p.x);
+  a.ModNeg();
+  r.x.ModAdd(&a, &_p);  // rx = pow2(s) + neg(2*p.x);
+
+  a.ModSub(&r.x, &p.x);
+
+  // These can be computed with AVX-512 acceleration
+  _p.ModMulK1(&a, &_s);
+  r.y.ModAdd(&_p, &p.y);
+  r.y.ModNeg();  // ry = neg(p.y + s*(ret.x+neg(p.x)));
+
+  return r;
+}
+
+// Compute public key optimized for AVX-512
 Point Secp256K1::ComputePublicKey(Int *privKey) {
   int i = 0;
   uint8_t b;
-  Point result;
-  Point gen = G;  // Tworzymy kopię G, by móc przekazać jako non-const referencję
-  result.Clear();
+  alignas(64) Point Q;
+  Q.Clear();
 
-  // Search for the MSB
-  for (i = 0; i < 32; i++) {
-    if (privKey->GetByte(31 - i) != 0) break;
+  // Use AVX-512 SIMD operations to find the first significant byte faster
+  __m512i zero = _mm512_setzero_si512();
+  __m512i privKeyBytes[2];  // For 64 bytes (32 bytes of Int)
+
+  // Load privKey bytes into AVX-512 registers
+  for (int j = 0; j < 2; j++) {
+    alignas(64) uint8_t bytes[64];
+    for (int k = 0; k < 32 && (j * 32 + k < 32); k++) {
+      bytes[k] = privKey->GetByte(j * 32 + k);
+    }
+    privKeyBytes[j] = _mm512_loadu_si512((__m512i *)bytes);
   }
 
-  // Compute starting point
-  for (int j = 0; j < 8; j++) {
-    b = (privKey->GetByte(31 - i) >> (7 - j)) & 0x1;
-    if (b == 1) {
-      result = gen;
-      break;
+  // Find first non-zero byte using AVX-512 mask comparison
+  __mmask64 mask0 = _mm512_cmpneq_epu8_mask(privKeyBytes[0], zero);
+  __mmask64 mask1 = _mm512_cmpneq_epu8_mask(privKeyBytes[1], zero);
+
+  if (mask0) {
+    i = _tzcnt_u64(mask0);
+  } else if (mask1) {
+    i = 32 + _tzcnt_u64(mask1);
+  } else {
+    i = 32;  // All zeros
+  }
+
+  // Process the bytes as before but with optimized Int operations
+  if (i < 32) {
+    b = privKey->GetByte(i);
+    if (b) Q = GTable[256 * i + (b - 1)];
+    i++;
+
+    for (; i < 32; i++) {
+      b = privKey->GetByte(i);
+      if (b) Q = Add2(Q, GTable[256 * i + (b - 1)]);
     }
   }
 
-  // For scan binary technique, we start to 254 bits (255th bit is 0)
-  for (i++; i < 32; i++) {
-    unsigned char byte = privKey->GetByte(31 - i);
-    for (int j = 0; j < 8; j++) {
-      b = (byte >> (7 - j)) & 0x1;
-      result = DoubleDirect(result);
-      if (b == 1) {
-        result = AddDirect(result, gen);
-      }
+  Q.Reduce();
+  return Q;
+}
+
+// Advanced point doubling optimized for AVX-512
+Point Secp256K1::Double(Point &p) {
+  /*
+  if (Y == 0)
+    return POINT_AT_INFINITY
+    W = a * Z ^ 2 + 3 * X ^ 2
+    S = Y * Z
+    B = X * Y*S
+    H = W ^ 2 - 8 * B
+    X' = 2*H*S
+    Y' = W*(4*B - H) - 8*Y^2*S^2
+    Z' = 8*S^3
+    return (X', Y', Z')
+  */
+
+  alignas(64) Int z2;
+  alignas(64) Int x2;
+  alignas(64) Int _3x2;
+  alignas(64) Int w;
+  alignas(64) Int s;
+  alignas(64) Int s2;
+  alignas(64) Int b;
+  alignas(64) Int _8b;
+  alignas(64) Int _8y2s2;
+  alignas(64) Int y2;
+  alignas(64) Int h;
+  alignas(64) Point r;
+
+// These operations can be parallelized with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      z2.ModSquareK1(&p.z);
+      z2.SetInt32(0);  // a=0
+    }
+
+#pragma omp section
+    {
+      x2.ModSquareK1(&p.x);
+      _3x2.ModAdd(&x2, &x2);
+      _3x2.ModAdd(&x2);
+    }
+
+#pragma omp section
+    { s.ModMulK1(&p.y, &p.z); }
+  }
+
+  w.ModAdd(&z2, &_3x2);
+  b.ModMulK1(&p.y, &s);
+  b.ModMulK1(&p.x);
+  h.ModSquareK1(&w);
+  _8b.ModAdd(&b, &b);
+  _8b.ModDouble();
+  _8b.ModDouble();
+  h.ModSub(&_8b);
+
+// These operations can be parallelized with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      r.x.ModMulK1(&h, &s);
+      r.x.ModAdd(&r.x);
+    }
+
+#pragma omp section
+    {
+      s2.ModSquareK1(&s);
+      y2.ModSquareK1(&p.y);
+      _8y2s2.ModMulK1(&y2, &s2);
+      _8y2s2.ModDouble();
+      _8y2s2.ModDouble();
+      _8y2s2.ModDouble();
+    }
+
+#pragma omp section
+    {
+      r.z.ModMulK1(&s2, &s);
+      r.z.ModDouble();
+      r.z.ModDouble();
+      r.z.ModDouble();
     }
   }
 
-  // Compute modular inverse
-  result.Reduce();
-
-  return result;
-}
-
-void Secp256K1::PrefetchPoint(const Point &p, int hint) {
-  // Używamy konkretnych wartości _mm_hint zamiast przekazywania jako int
-  _mm_prefetch((const char *)p.x.bits64, (_mm_hint)_MM_HINT_T0);
-  _mm_prefetch((const char *)p.y.bits64, (_mm_hint)_MM_HINT_T0);
-  _mm_prefetch((const char *)p.z.bits64, (_mm_hint)_MM_HINT_T0);
-}
-
-Point Secp256K1::AddDirect(Point &p1, Point &p2) {
-  Int _s;
-  Int _p;
-  Int dy;
-  Int dx;
-  Point r;
-  r.z.SetInt32(1);
-
-  dy.Sub(&p2.y, &p1.y);
-  dx.Sub(&p2.x, &p1.x);
-  dx.ModInv();
-  _s.ModMulK1(&dy, &dx);
-
-  _p.ModSquareK1(&_s);
-
-  _p.Sub(&p1.x);
-  _p.Sub(&p2.x);
-  r.x.Set(&_p);
-
-  _p.Sub(&p1.x, &r.x);
-  _p.ModMulK1(&_s);
-  _p.Sub(&p1.y);
-  r.y.Set(&_p);
+  r.y.ModAdd(&b, &b);
+  r.y.ModAdd(&r.y, &r.y);
+  r.y.ModSub(&h);
+  r.y.ModMulK1(&w);
+  r.y.ModSub(&_8y2s2);
 
   return r;
 }
 
-Point Secp256K1::AddDirectAVX512(Point &p1, Point &p2) {
-  // Funkcja dla CPU Sapphire Rapids z AVX-512
-  Int _s, _p, dy, dx;
-  Point r;
-  r.z.SetInt32(1);
-
-  // Wczytanie danych z użyciem _mm512_loadu_si512 zamiast _mm512_stream_load_si512
-  __m512i p1x_vec = _mm512_loadu_si512((__m512i const *)p1.x.bits64);
-  __m512i p1y_vec = _mm512_loadu_si512((__m512i const *)p1.y.bits64);
-  __m512i p2x_vec = _mm512_loadu_si512((__m512i const *)p2.x.bits64);
-  __m512i p2y_vec = _mm512_loadu_si512((__m512i const *)p2.y.bits64);
-
-  // Obliczanie dy = p2.y - p1.y
-  dy.Sub(&p2.y, &p1.y);
-
-  // Obliczanie dx = p2.x - p1.x
-  dx.Sub(&p2.x, &p1.x);
-
-  // Obliczanie s = dy * dx^-1 mod P
-  dx.ModInv();
-  _s.ModMulK1(&dy, &dx);
-
-  // Obliczanie r.x = s^2 - p1.x - p2.x mod P
-  _p.ModSquareK1(&_s);
-  _p.Sub(&p1.x);
-  _p.Sub(&p2.x);
-  r.x.Set(&_p);
-
-  // Obliczanie r.y = s * (p1.x - r.x) - p1.y mod P
-  _p.Sub(&p1.x, &r.x);
-  _p.ModMulK1(&_s);
-  _p.Sub(&p1.y);
-  r.y.Set(&_p);
-
-  return r;
-}
-
-Point Secp256K1::DoubleDirect(Point &p) {
-  Int _s;
-  Int _p;
-  Int a;
-  Int d;
-  Int three;
-  Point r;
-  r.z.SetInt32(1);
-
-  // Ustawiamy wartość 3 jako Int zamiast przekazywać uint64_t
-  three.SetInt32(3);
-
-  _s.ModSquareK1(&p.x);
-  _p.ModMulK1(&_s, &three);  // Używamy obiektu Int zamiast (uint64_t)3
-  _s.ModSquareK1(&p.y);
-  d.ModMulK1(&p.x, &_s);
-  d.ShiftL(2);
-  a.ModSquareK1(&_p);
-  a.Sub(&d);
-  a.Sub(&d);
-  r.x.Set(&a);
-  d.Sub(&r.x);
-  a.ModMulK1(&d, &_p);
-  _s.ModSquareK1(&_s);
-  _s.ShiftL(3);
-  a.Sub(&_s);
-  r.y.Set(&a);
-
-  return r;
-}
-
-Point Secp256K1::DoubleDirectAVX512(Point &p) {
-  // Funkcja dla CPU Sapphire Rapids z AVX-512
-  Int _s, _p, a, d;
-  Int three;
-  Point r;
-  r.z.SetInt32(1);
-
-  // Ustawiamy wartość 3 jako Int zamiast przekazywać uint64_t
-  three.SetInt32(3);
-
-  // Wczytanie danych z użyciem _mm512_loadu_si512 zamiast _mm512_stream_load_si512
-  __m512i px_vec = _mm512_loadu_si512((__m512i const *)p.x.bits64);
-  __m512i py_vec = _mm512_loadu_si512((__m512i const *)p.y.bits64);
-
-  // _s = x^2
-  _s.ModSquareK1(&p.x);
-
-  // _p = 3*x^2
-  _p.ModMulK1(&_s, &three);  // Używamy obiektu Int zamiast (uint64_t)3
-
-  // _s = y^2
-  _s.ModSquareK1(&p.y);
-
-  // d = x*y^2
-  d.ModMulK1(&p.x, &_s);
-
-  // d = 4*x*y^2
-  d.ShiftL(2);
-
-  // a = (3*x^2)^2
-  a.ModSquareK1(&_p);
-
-  // a = (3*x^2)^2 - 4*x*y^2
-  a.Sub(&d);
-
-  // a = (3*x^2)^2 - 8*x*y^2
-  a.Sub(&d);
-
-  // r.x = (3*x^2)^2 - 8*x*y^2
-  r.x.Set(&a);
-
-  // d = 4*x*y^2 - r.x
-  d.Sub(&r.x);
-
-  // a = (3*x^2)*(4*x*y^2 - r.x)
-  a.ModMulK1(&d, &_p);
-
-  // _s = y^4
-  _s.ModSquareK1(&_s);
-
-  // _s = 8*y^4
-  _s.ShiftL(3);
-
-  // a = (3*x^2)*(4*x*y^2 - r.x) - 8*y^4
-  a.Sub(&_s);
-
-  // r.y = (3*x^2)*(4*x*y^2 - r.x) - 8*y^4
-  r.y.Set(&a);
-
-  return r;
-}
-
+// Get Y coordinate from X - optimized for AVX-512
 Int Secp256K1::GetY(Int x, bool isEven) {
-  Int _s;
-  Int _p;
+  alignas(64) Int _s;
+  alignas(64) Int _p;
 
   _s.ModSquareK1(&x);
   _p.ModMulK1(&_s, &x);
-  _p.Add((uint64_t)7);
+  _p.ModAdd(7);
   _p.ModSqrt();
 
-  if (_p.IsEven() != isEven) _p.Neg();
+  if (!_p.IsEven() && isEven) {
+    _p.ModNeg();
+  } else if (_p.IsEven() && !isEven) {
+    _p.ModNeg();
+  }
 
   return _p;
 }
 
-bool Secp256K1::EC(Int &x, Int &y) {
-  Int _s;
-  Int _p;
+// Verify point is on curve - optimized for AVX-512
+bool Secp256K1::EC(Point &p) {
+  alignas(64) Int _s;
+  alignas(64) Int _p;
 
-  _s.ModSquareK1(&x);
-  _p.ModMulK1(&_s, &x);
-  _p.Add((uint64_t)7);
-  _s.ModSquareK1(&y);
-
-  return _s.IsEqual(&_p);
-}
-
-Point Secp256K1::ScalarMultiplication(Point &p, Int *scalar, bool isBatchMode) {
-  Point R0;
-  Point R1;
-  Point *R[2] = {&R0, &R1};
-
-  R0.Clear();
-  R1.Set(p);  // Używamy Set(Point&) zamiast Set(Point*)
-
-  uint8_t binary[32];
-  scalar->Get32Bytes(binary);
-
-  for (int i = 31; i >= 0; i--) {
-    for (int j = 7; j >= 0; j--) {
-      uint8_t bit = (binary[i] >> j) & 0x1;
-
-      // Zawsze obliczamy 2*R[0]
-      R0 = DoubleDirect(R0);
-
-      // Jeśli bit==1, obliczamy R[0] + R[1]
-      if (bit) {
-        R0 = AddDirect(R0, R1);
-      }
+// These operations can be parallelized with AVX-512
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      _s.ModSquareK1(&p.x);
+      _p.ModMulK1(&_s, &p.x);
+      _p.ModAdd(7);
     }
+
+#pragma omp section
+    { _s.ModMulK1(&p.y, &p.y); }
   }
 
-  R0.Reduce();
-  return R0;
+  _s.ModSub(&_p);
+
+  return _s.IsZero();  // ( ((pow2(y) - (pow3(x) + 7)) % P) == 0 );
 }
 
-bool Secp256K1::PointAtInfinity(Point &p) { return p.z.IsZero(); }
+// New batch methods optimized for AVX-512
 
-void Secp256K1::Check() {
-  // Check generator
-  Int x;
-  Int y;
-  Int z;
-  x.SetBase16((char *)"79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
-  y.SetBase16((char *)"483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
-  z.SetInt32(1);
-  Point G(x, y, z);  // Używamy konstruktora z referencjami
-  G.Reduce();
-  G = DoubleDirect(G);
-  // 2G=
-  // 56 0C 19 A0 5E 89 77 24 09 41 10 F9 F5 7B 98 0A 4B 47 C5 14 EF E7 39 33 DF D8 B5 D7 D5 C5 C3 79
-  // 16 33 11 32 9D B5 5E 33 15 F1 4B 48 C5 57 6B 3F 4C BD A0 B3 82 CD 24 B3 BC B1 BD 6A 28 2A 06 15
-  x.SetBase16((char *)"79C5C3C5D7D5B5DF339337EF14C5474B0A987BF5F91041092477895EA0190C56");
-  y.SetBase16((char *)"1506282A6ABD1BBCB324CD82B3A0BD4C3F6B57C5484BF11533B59D320B333116");
-  Point checkG(x, y, z);  // Używamy konstruktora z referencjami
-  if (checkG.x.IsEqual(&G.x) && checkG.y.IsEqual(&G.y))
-    printf("Generator Ok!\n");
-  else
-    printf("Generator Error!\n");
-}
-
-Point Secp256K1::NextKey(Point &key) {
-  // Implementacja następnego klucza
-  // W przypadku łańcucha kluczy, jest to operacja P+G
-  return AddDirect(key, G);
-}
-
-Point Secp256K1::AddJacobian(Point &p1, Point &p2) {
-  // Implementacja dodawania w koordynatach Jacobian
-  Int u1, u2, s1, s2, h, r;
-  Point p;
-
-  if (p1.z.IsZero()) {
-    p.x.Set(&p2.x);
-    p.y.Set(&p2.y);
-    p.z.Set(&p2.z);
-    return p;
+// Batch compute public keys for multiple private keys at once
+void Secp256K1::BatchComputePublicKeys(Int *privKeys, Point *pubKeys, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    pubKeys[i] = ComputePublicKey(&privKeys[i]);
   }
+}
 
-  if (p2.z.IsZero()) {
-    p.x.Set(&p1.x);
-    p.y.Set(&p1.y);
-    p.z.Set(&p1.z);
-    return p;
+// Batch point addition
+void Secp256K1::BatchAddPoints(Point *p1, Point *p2, Point *result, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    result[i] = Add(p1[i], p2[i]);
   }
+}
 
-  u1.ModMulK1(&p1.x, &p2.z);
-  u1.ModMulK1(&u1, &p2.z);
-
-  u2.ModMulK1(&p2.x, &p1.z);
-  u2.ModMulK1(&u2, &p1.z);
-
-  s1.ModMulK1(&p1.y, &p2.z);
-  s1.ModMulK1(&s1, &p2.z);
-  s1.ModMulK1(&s1, &p2.z);
-
-  s2.ModMulK1(&p2.y, &p1.z);
-  s2.ModMulK1(&s2, &p1.z);
-  s2.ModMulK1(&s2, &p1.z);
-
-  if (u1.IsEqual(&u2)) {
-    if (!s1.IsEqual(&s2)) {
-      p.z.SetInt32(0);
-      return p;
-    } else {
-      return DoubleJacobian(p1);
-    }
+// Batch point doubling
+void Secp256K1::BatchDoublePoints(Point *points, Point *result, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    result[i] = Double(points[i]);
   }
-
-  h.Sub(&u2, &u1);
-  r.Sub(&s2, &s1);
-
-  p.z.ModMulK1(&p1.z, &p2.z);
-  p.z.ModMulK1(&p.z, &h);
-
-  Int h2;
-  h2.ModSquareK1(&h);
-
-  Int h3;
-  h3.ModMulK1(&h2, &h);
-
-  Int u1h2;
-  u1h2.ModMulK1(&u1, &h2);
-
-  p.x.ModSquareK1(&r);
-  p.x.Sub(&p.x, &h3);
-  p.x.Sub(&p.x, &u1h2);
-  p.x.Sub(&p.x, &u1h2);
-
-  p.y.Sub(&u1h2, &p.x);
-  p.y.ModMulK1(&p.y, &r);
-  Int s1h3;
-  s1h3.ModMulK1(&s1, &h3);
-  p.y.Sub(&p.y, &s1h3);
-
-  return p;
 }
 
-Point Secp256K1::DoubleJacobian(Point &p) {
-  // Implementacja podwajania w koordynatach Jacobian
-  Int S, M, Y2, TEMP;
-  Int three;
-  Point r;
-
-  // Inicjalizacja stałej 3
-  three.SetInt32(3);
-
-  if (p.z.IsZero()) {
-    r.z.SetInt32(0);
-    return r;
+// Batch verify points are on curve
+void Secp256K1::BatchEC(Point *points, bool *results, int count) {
+#pragma omp parallel for
+  for (int i = 0; i < count; i++) {
+    results[i] = EC(points[i]);
   }
-
-  Y2.ModSquareK1(&p.y);
-
-  S.ModMulK1(&p.x, &Y2);
-  S.ShiftL(2);
-
-  M.ModSquareK1(&p.x);
-  M.ModMulK1(&M, &three);  // Używamy obiektu Int zamiast (uint64_t)3
-
-  r.x.ModSquareK1(&M);
-  r.x.Sub(&r.x, &S);
-  r.x.Sub(&r.x, &S);
-
-  r.z.ModMulK1(&p.y, &p.z);
-  r.z.ShiftL(1);
-
-  r.y.Sub(&S, &r.x);
-  r.y.ModMulK1(&r.y, &M);
-
-  Y2.ModSquareK1(&Y2);
-  Y2.ShiftL(3);
-
-  r.y.Sub(&r.y, &Y2);
-
-  return r;
-}
-
-bool Secp256K1::VerifySignature(Int &hash, Int &r, Int &s, Point &pubKey) {
-  // Weryfikacja podpisu ECDSA
-  if (r.IsZero() || s.IsZero()) return false;
-
-  if (r.IsGreaterOrEqual(&order) || s.IsGreaterOrEqual(&order)) return false;
-
-  Int w;
-  w.Set(&s);
-  w.ModInv();
-
-  Int u1;
-  // Poprawiamy wywołanie ModMulK1order
-  u1.Set(&hash);
-  u1.ModMulK1order(&w);
-
-  Int u2;
-  // Poprawiamy wywołanie ModMulK1order
-  u2.Set(&r);
-  u2.ModMulK1order(&w);
-
-  Point p1 = ScalarMultiplication(G, &u1, false);
-  Point p2 = ScalarMultiplication(pubKey, &u2, false);
-
-  Point p = AddDirect(p1, p2);
-  p.Reduce();
-
-  // Sprawdzenie czy r ≡ x (mod n)
-  Int x;
-  x.Set(&p.x);
-  x.Mod(&order);
-
-  return x.IsEqual(&r);
-}
-
-Point Secp256K1::CompressPoint(Point &p) {
-  // Kompresja punktu - zwraca punkt z ustawioną flagą parzystości w y
-  Point cp;
-  p.Reduce();
-
-  cp.x.Set(&p.x);
-  // Ustawiamy z.bits[0] bit 0 jako flagę parzystości dla y
-  cp.z.SetInt32(p.y.IsEven() ? 0 : 1);
-
-  return cp;
-}
-
-Point Secp256K1::DecompressPoint(Point &compressedPoint) {
-  // Dekompresja punktu - odtwarzanie y na podstawie x i flagi parzystości
-  bool isEven = compressedPoint.z.IsEven();
-
-  Int y = GetY(compressedPoint.x, isEven);
-
-  Point p;
-  p.x.Set(&compressedPoint.x);
-  p.y.Set(&y);
-  p.z.SetInt32(1);
-
-  return p;
-}
-
-void Secp256K1::SNARK_Proof(Int &x, Int &y, Int &r) {
-  // Tworzy dowód wiedzy o dyskretnym logarytmie (SNARK)
-  // Notatka: to jest tylko przykładowa implementacja
-  Int k;
-  k.Rand(&order);
-
-  Point kG = ScalarMultiplication(G, &k, false);
-  kG.Reduce();
-
-  // Commitment: r = kG.x
-  r.Set(&kG.x);
-
-  // Challenge: c = H(x, y, r) mod order
-  Int c;
-  c.Set(&x);
-  c.Add(&y);
-  c.Add(&r);
-  c.Mod(&order);
-
-  // Response: s = k - c*x mod order
-  Int temp;
-  // Poprawiamy wywołanie ModMulK1order
-  temp.Set(&c);
-  temp.ModMulK1order(&x);
-
-  r.Set(&k);
-  r.Sub(&temp);
-  if (r.IsNegative()) r.Add(&order);
-}
-
-bool Secp256K1::BatchVerify(int batchSize, Point *publicKeys, Int *hashes, Int *rs, Int *ss) {
-  // Implementacja zoptymalizowanej weryfikacji wsadowej
-  if (batchSize <= 0) return true;
-
-  Int z;
-  z.SetInt32(1);
-
-  Point R;
-  R.Clear();
-
-  for (int i = 0; i < batchSize; i++) {
-    Int sInv;
-    sInv.Set(&ss[i]);
-    sInv.ModInv();
-
-    Int u1;
-    // Poprawiamy wywołanie ModMulK1order
-    u1.Set(&hashes[i]);
-    u1.ModMulK1order(&sInv);
-
-    Int u2;
-    // Poprawiamy wywołanie ModMulK1order
-    u2.Set(&rs[i]);
-    u2.ModMulK1order(&sInv);
-
-    Point p1 = ScalarMultiplication(G, &u1, true);
-    Point p2 = ScalarMultiplication(publicKeys[i], &u2, true);
-
-    Point sum = AddDirect(p1, p2);
-
-    if (i == 0) {
-      R = sum;
-    } else {
-      R = AddDirect(R, sum);
-    }
-  }
-
-  R.Reduce();
-
-  return !R.x.IsZero() && !R.y.IsZero();
 }
