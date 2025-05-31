@@ -1,5 +1,7 @@
 #include <immintrin.h>
-#include <omp.h>
+#include <string.h>
+
+#include <stdexcept>
 
 #include "IntGroup.h"
 
@@ -11,13 +13,19 @@ IntGroup::IntGroup(int size) {
 // Use aligned allocation for AVX-512 (64-byte alignment)
 #ifdef _MSC_VER
   subp = (Int *)_aligned_malloc(size * sizeof(Int), 64);
+  if (subp == nullptr) {
+    throw std::runtime_error("Memory allocation failed");
+  }
 #else
-  posix_memalign((void **)&subp, 64, size * sizeof(Int));
+  int result = posix_memalign((void **)&subp, 64, size * sizeof(Int));
+  if (result != 0) {
+    throw std::runtime_error("Memory allocation failed");
+  }
 #endif
 
   // Initialize aligned memory with zeros
   for (int i = 0; i < size; i++) {
-    subp[i].CLEAR();
+    subp[i].SetInt32(0);  // Use public method instead of CLEAR()
   }
 }
 
@@ -73,8 +81,8 @@ void IntGroup::ModInv() {
 // AVX-512 optimized version of ModInv for larger batches
 void IntGroup::AlignedModInv() {
   // Pre-compute alignment and prepare AVX-512 registers
-  alignas(64) Int newValue;
-  alignas(64) Int inverse;
+  Int newValue;
+  Int inverse;
 
   // First pass: build product tree with AVX-512 acceleration
   subp[0].Set(&ints[0]);
