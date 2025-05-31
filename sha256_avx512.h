@@ -4,14 +4,9 @@
 #include <array>
 #include <cstdint>
 
-// AVX-512 optimized SHA-256 for Intel Sapphire Rapids ONLY
-// 16-way parallel processing - maximum performance
+// AVX-512 optimized SHA-256 for Intel Xeon Platinum 8488C (Sapphire Rapids)
+// 16-way parallel processing - maximum performance for Bitcoin puzzle solving
 
-void sha256avx512_16B(
-    const std::array<std::array<uint8_t, 64>, 16>& data_blocks,
-    std::array<std::array<uint8_t, 32>, 16>& hash_results);
-
-// Pointer interface for compatibility
 void sha256avx512_16B(
     const uint8_t* data0, const uint8_t* data1, const uint8_t* data2,
     const uint8_t* data3, const uint8_t* data4, const uint8_t* data5,
